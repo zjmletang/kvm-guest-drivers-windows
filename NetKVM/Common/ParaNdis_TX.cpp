@@ -766,6 +766,17 @@ CNB::~CNB()
     {
         NdisMFreeNetBufferSGList(m_Context->DmaHandle, m_SGL, m_NB);
     }
+#if MAX_FRAGMENTS_IN_ONE_NB
+    if (m_CopySGL != nullptr)
+    {
+        NdisFreeMemoryWithTagPriority(m_Context->MiniportHandle, m_CopySGL, PARANDIS_MEMORY_TAG);
+    }
+    for (ULONG i = 0; i < m_UsedPagesCount; i++)
+    {
+        m_Context->SendCopyPagesInUsed.Remove(m_UsedPages[i]);
+        m_Context->SendCopyPages.Push(m_UsedPages[i]);
+    }
+#endif
 }
 
 void CNB::ReleaseResources()
@@ -775,6 +786,19 @@ void CNB::ReleaseResources()
         NdisMFreeNetBufferSGList(m_Context->DmaHandle, m_SGL, m_NB);
         m_SGL = nullptr;
     }
+#if MAX_FRAGMENTS_IN_ONE_NB
+    if (m_CopySGL != nullptr)
+    {
+        NdisFreeMemoryWithTagPriority(m_Context->MiniportHandle, m_CopySGL, PARANDIS_MEMORY_TAG);
+        m_CopySGL = nullptr;
+    }
+    for (ULONG i = 0; i < m_UsedPagesCount; i++)
+    {
+        m_Context->SendCopyPagesInUsed.Remove(m_UsedPages[i]);
+        m_Context->SendCopyPages.Push(m_UsedPages[i]);
+    }
+    m_UsedPagesCount = 0;
+#endif
 }
 
 bool CNB::ScheduleBuildSGListForTx()
@@ -894,10 +918,23 @@ void CNB::DoIPHdrCSO(PVOID IpHeader, ULONG EthPayloadLength) const
                                 FALSE, __FUNCTION__);
 }
 
-bool CNB::FillDescriptorSGList(CTXDescriptor &Descriptor, ULONG ParsedHeadersLength) const
+bool CNB::FillDescriptorSGList(CTXDescriptor &Descriptor, ULONG ParsedHeadersLength) 
 {
-    return Descriptor.SetupHeaders(ParsedHeadersLength) &&
-           MapDataToVirtioSGL(Descriptor, ParsedHeadersLength + NET_BUFFER_DATA_OFFSET(m_NB));
+    if (!Descriptor.SetupHeaders(ParsedHeadersLength))
+    {
+        return false;
+    }
+#if MAX_FRAGMENTS_IN_ONE_NB
+    if (m_SGL->NumberOfElements > m_Context->uMaxFragmentsInOneNB - Descriptor.GetCurrVirtioSGLEntry())
+    {
+        if (!AllocateAndFillCopySGL())
+        {
+            return false;
+        }
+        return MapCopyDataToVirtioSGL(Descriptor, ParsedHeadersLength);
+    }
+#endif
+    return MapDataToVirtioSGL(Descriptor, ParsedHeadersLength + NET_BUFFER_DATA_OFFSET(m_NB));
 }
 
 bool CNB::MapDataToVirtioSGL(CTXDescriptor &Descriptor, ULONG Offset) const
@@ -1060,3 +1097,133 @@ ULONG CNB::Copy(PVOID Dst, ULONG Length) const
 
     return Copied;
 }
+
+
+#ifdef MAX_FRAGMENTS_IN_ONE_NB
+    bool CNB::AllocateAndFillCopySGL() 
+    {
+        //decide how many pages should be used 
+        ULONG uDataLength = GetDataLength();
+        ULONG uPages = (GetDataLength() + PAGE_SIZE - 1) / PAGE_SIZE;
+        ULONG SGListSize = sizeof(SCATTER_GATHER_LIST) + sizeof(SCATTER_GATHER_ELEMENT) * uPages;
+        if (m_CopySGL == nullptr)
+        {
+            m_CopySGL = (PSCATTER_GATHER_LIST)NdisAllocateMemoryWithTagPriority(m_Context->MiniportHandle,
+                SGListSize,
+                PARANDIS_MEMORY_TAG,
+                NormalPoolPriority);
+            if (m_CopySGL == nullptr)
+            {
+                DPrintf(0, "[%s] CopySGL allocation failed \n", __FUNCTION__);
+                return false;
+            }
+        }
+        m_CopySGL->NumberOfElements = uPages;
+
+        ULONG uDataOffset = 0;
+        for (ULONG i = 0; i < uPages; i++)
+        {
+            CNdisSharedMemory* pPage = m_Context->SendCopyPages.Pop();
+            if (pPage == nullptr)
+            {
+                DPrintf(0, "[%s] no available shared pages !\n", __FUNCTION__);
+                return false;
+            }
+            else
+            {
+                m_Context->SendCopyPagesInUsed.Push(pPage);
+                m_UsedPages[i] = pPage;
+                m_UsedPagesCount++;
+                PVOID pVirtualAddress = pPage->GetVA();
+                ULONG uCopySize = (i == uPages - 1) ? (uDataLength - uDataOffset) : PAGE_SIZE;
+                ULONG uCopied = Copy(pVirtualAddress, uCopySize, uDataOffset);
+                if (uCopied != uCopySize)
+                {
+                    DPrintf(0, "[%s] copy failed! expected %lu, copied %lu bytes\n", __FUNCTION__, uCopySize, uCopied);
+                    return false;
+                }
+                m_CopySGL->Elements[i].Address = pPage->GetPA();
+                m_CopySGL->Elements[i].Length  = uCopySize;
+                uDataOffset += uCopySize;  // Adjust offset, last page might not need adjustment but does not harm
+            }
+        }
+        return true;
+    }
+#endif
+
+
+#if MAX_FRAGMENTS_IN_ONE_NB
+    bool CNB::MapCopyDataToVirtioSGL(CTXDescriptor &Descriptor, ULONG Offset) const
+    {
+        for (ULONG i = 0; i < m_CopySGL->NumberOfElements; i++)
+        {
+            if (Offset < m_CopySGL->Elements[i].Length)
+            {
+                PHYSICAL_ADDRESS PA;
+                PA.QuadPart = m_CopySGL->Elements[i].Address.QuadPart + Offset;
+
+                if (!Descriptor.AddDataChunk(PA, m_CopySGL->Elements[i].Length - Offset))
+                {
+                    return false;
+                }
+                Offset = 0;
+            }
+            else
+            {
+                Offset -= m_CopySGL->Elements[i].Length;
+            }
+        }
+
+        return true;
+    }
+#endif
+
+#if MAX_FRAGMENTS_IN_ONE_NB
+    ULONG CNB::Copy(PVOID Dst, ULONG Length, ULONG DataOffset) const
+    {
+        //find the MDL where the offset position, DataOffset, is located.
+        ULONG Offset = 0;
+        PMDL DataOffsetMDL = nullptr;
+        for (DataOffsetMDL = NET_BUFFER_CURRENT_MDL(m_NB);; DataOffsetMDL = DataOffsetMDL->Next)
+        {
+            Offset += MmGetMdlByteCount(DataOffsetMDL);
+            if (Offset > DataOffset + NET_BUFFER_CURRENT_MDL_OFFSET(m_NB) || DataOffsetMDL->Next == nullptr)
+            {
+                break;
+            }
+        }
+        ULONG CurrOffset = MmGetMdlByteCount(DataOffsetMDL) - (Offset - DataOffset - NET_BUFFER_CURRENT_MDL_OFFSET(m_NB));
+        ULONG Copied = 0;
+
+        Length = min(Length, NET_BUFFER_DATA_LENGTH(m_NB) - DataOffset);
+             
+        for (PMDL CurrMDL = DataOffsetMDL;
+            CurrMDL != nullptr && Copied < Length;
+            CurrMDL = CurrMDL->Next)
+        {
+            ULONG CurrLen;
+            PVOID CurrAddr = nullptr;
+
+    #if NDIS_SUPPORT_NDIS620
+            NdisQueryMdl(CurrMDL, &CurrAddr, &CurrLen, MM_PAGE_PRIORITY(LowPagePriority | MdlMappingNoExecute));
+    #else
+            NdisQueryMdl(CurrMDL, &CurrAddr, &CurrLen, MM_PAGE_PRIORITY(LowPagePriority));
+    #endif
+
+            if (CurrAddr == nullptr)
+            {
+                break;
+            }
+
+            CurrLen = min(CurrLen - CurrOffset, Length - Copied);
+
+            NdisMoveMemory(RtlOffsetToPointer(Dst, Copied),
+                RtlOffsetToPointer(CurrAddr, CurrOffset),
+                CurrLen);
+            Copied += CurrLen;
+            CurrOffset = 0;
+        }
+
+        return Copied;
+    }
+#endif

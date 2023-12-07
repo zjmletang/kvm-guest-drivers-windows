@@ -126,6 +126,11 @@ public:
     bool AddDataChunk(const PHYSICAL_ADDRESS &PA, ULONG Length);
     bool SetupHeaders(ULONG ParsedHeadersLength);
 
+#if MAX_FRAGMENTS_IN_ONE_NB
+    ULONG GetCurrVirtioSGLEntry()
+    { return m_CurrVirtioSGLEntry; }
+#endif
+
 private:
     CTXHeaders m_Headers;
     CNdisSharedMemory m_IndirectArea;

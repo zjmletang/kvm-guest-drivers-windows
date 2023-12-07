@@ -202,6 +202,9 @@ struct CPUPathBundle : public CPlacementAllocatable {
 #define PARANDIS_MAX_LSO_SIZE               0xF800
 
 #define PARANDIS_UNLIMITED_PACKETS_TO_INDICATE  (~0ul)
+#if MAX_FRAGMENTS_IN_ONE_NB
+    #define PARANDIS_SEND_COPY_PAGES        1024
+#endif
 
 static const ULONG PARANDIS_PACKET_FILTERS =
     NDIS_PACKET_TYPE_DIRECTED |
@@ -553,6 +556,11 @@ struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
             LARGE_INTEGER           CoalesceEvents;
         }                           Statistics;
     } RSC = {};
+#endif
+#if MAX_FRAGMENTS_IN_ONE_NB
+    ULONG                                                        uMaxFragmentsInOneNB;
+    CNdisList<CNdisSharedMemory, CLockedAccess, CCountingObject> SendCopyPages;
+    CNdisList<CNdisSharedMemory, CLockedAccess, CCountingObject> SendCopyPagesInUsed;
 #endif
 
     _PARANDIS_ADAPTER(const _PARANDIS_ADAPTER&) = delete;

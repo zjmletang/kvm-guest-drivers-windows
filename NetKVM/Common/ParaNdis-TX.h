@@ -6,7 +6,9 @@
 
 /* Must be a power of 2 */
 #define PARANDIS_TX_LOCK_FREE_QUEUE_DEFAULT_SIZE 2048
-
+#if MAX_FRAGMENTS_IN_ONE_NB
+    #define MAX_PACKET_PAGES ((65535 / PAGE_SIZE) + 1)
+#endif
 class CNB;
 class CParaNdisTX;
 
@@ -60,10 +62,15 @@ private:
     USHORT QueryL4HeaderOffset(PVOID PacketData, ULONG IpHeaderOffset) const;
     void DoIPHdrCSO(PVOID EthHeaders, ULONG HeadersLength) const;
     void SetupCSO(virtio_net_hdr *VirtioHeader, ULONG L4HeaderOffset) const;
-    bool FillDescriptorSGList(CTXDescriptor &Descriptor, ULONG DataOffset) const;
+    bool FillDescriptorSGList(CTXDescriptor &Descriptor, ULONG DataOffset);
     bool MapDataToVirtioSGL(CTXDescriptor &Descriptor, ULONG Offset) const;
     void PopulateIPLength(IPHeader *IpHeader, USHORT IpLength) const;
 
+#if MAX_FRAGMENTS_IN_ONE_NB
+    ULONG Copy(PVOID Dst, ULONG Length, ULONG DataOffset) const;
+    bool MapCopyDataToVirtioSGL(CTXDescriptor &Descriptor, ULONG Offset) const;
+    bool AllocateAndFillCopySGL();
+#endif
     PNET_BUFFER m_NB;
     CNBL *m_ParentNBL;
     PPARANDIS_ADAPTER m_Context;
@@ -71,6 +78,13 @@ private:
 
     CNB(const CNB&) = delete;
     CNB& operator= (const CNB&) = delete;
+
+#if MAX_FRAGMENTS_IN_ONE_NB
+    PSCATTER_GATHER_LIST m_CopySGL = nullptr;
+    ULONG m_UsedPagesCount         = 0;
+    CNdisSharedMemory* m_UsedPages[MAX_PACKET_PAGES] = { nullptr };
+#endif
+
 
     DECLARE_CNDISLIST_ENTRY(CNB);
 };

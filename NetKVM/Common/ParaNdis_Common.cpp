@@ -106,6 +106,9 @@ typedef struct _tagConfigurationEntries
     tConfigurationEntry USOv4Supported;
     tConfigurationEntry USOv6Supported;
 #endif
+#if MAX_FRAGMENTS_IN_ONE_NB
+    tConfigurationEntry MaxFragmentsInOneNB;
+#endif
 }tConfigurationEntries;
 
 static const tConfigurationEntries defaultConfiguration =
@@ -143,6 +146,10 @@ static const tConfigurationEntries defaultConfiguration =
     { "*UsoIPv4", 1, 0, 1},
     { "*UsoIPv6", 1, 0, 1},
 #endif
+#if MAX_FRAGMENTS_IN_ONE_NB
+    {"MaxFragmentsInOneNB",MAX_FRAGMENTS_IN_ONE_NB,16,256},
+#endif
+
 };
 
 static void ParaNdis_ResetVirtIONetDevice(PARANDIS_ADAPTER *pContext)
@@ -277,6 +284,10 @@ static void ReadNicConfiguration(PARANDIS_ADAPTER *pContext, PUCHAR pNewMACAddre
             GetConfigurationEntry(cfg, &pConfiguration->USOv6Supported);
 #endif
 
+#if MAX_FRAGMENTS_IN_ONE_NB
+            GetConfigurationEntry(cfg, &pConfiguration->MaxFragmentsInOneNB);
+#endif
+
             bDebugPrint = pConfiguration->isLogEnabled.ulValue;
             virtioDebugLevel = pConfiguration->debugLevel.ulValue;
             pContext->physicalMediaType = (NDIS_PHYSICAL_MEDIUM)pConfiguration->PhysicalMediaType.ulValue;
@@ -341,6 +352,9 @@ static void ReadNicConfiguration(PARANDIS_ADAPTER *pContext, PUCHAR pNewMACAddre
             pContext->RSC.bIPv4SupportedSW = (UCHAR)pConfiguration->RSCIPv4Supported.ulValue;
             pContext->RSC.bIPv6SupportedSW = (UCHAR)pConfiguration->RSCIPv6Supported.ulValue;
 #endif
+#if MAX_FRAGMENTS_IN_ONE_NB
+            pContext->uMaxFragmentsInOneNB = pConfiguration->MaxFragmentsInOneNB.ulValue;
+#endif 
             if (!pContext->bDoSupportPriority)
                 pContext->ulPriorityVlanSetting = 0;
             // if Vlan not supported
@@ -1098,7 +1112,23 @@ static NDIS_STATUS ParaNdis_VirtIONetInit(PARANDIS_ADAPTER *pContext)
     DEBUG_ENTRY(0);
     UINT i;
     USHORT nVirtIOQueues = pContext->nHardwareQueues * 2 + 2;
-
+#if MAX_FRAGMENTS_IN_ONE_NB
+    for (ULONG j = 0; j < PARANDIS_SEND_COPY_PAGES; j++)
+    {
+        CNdisSharedMemory* pPage = (CNdisSharedMemory*)ParaNdis_AllocateMemory(pContext, sizeof(*pPage));
+        pPage->Create(pContext->MiniportHandle);
+        if (pPage->Allocate(PAGE_SIZE))
+        {
+            pContext->SendCopyPages.Push(pPage);
+        }
+        else
+        {
+            //do not exit init even if allocation fails
+            DPrintf(0, "[%s] failed to allocate pages, [%d] pages have been allocated\n", __FUNCTION__,j);
+            break;
+        }
+    }
+#endif
     pContext->nPathBundles = DetermineQueueNumber(pContext);
     if (pContext->nPathBundles == 0)
     {
@@ -1448,6 +1478,19 @@ static VOID ParaNdis_CleanupContext(PARANDIS_ADAPTER *pContext)
     }
 
     virtio_device_shutdown(&pContext->IODevice);
+
+#ifdef MAX_FRAGMENTS_IN_ONE_NB
+    pContext->SendCopyPages.ForEach([](CNdisSharedMemory* e) {
+        e->~CNdisSharedMemory();
+        NdisFreeMemory(e, 0, 0);
+    }
+    );
+    pContext->SendCopyPagesInUsed.ForEach([](CNdisSharedMemory* e) {
+        e->~CNdisSharedMemory();
+        NdisFreeMemory(e, 0, 0);
+    }
+    );
+#endif
 
 }
 
