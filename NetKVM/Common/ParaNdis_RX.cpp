@@ -6,6 +6,11 @@
 #include "ParaNdis_RX.tmh"
 #endif
 
+// Additional includes for merge buffer support
+extern "C" {
+#include <ntddk.h>
+}
+
 // define as 0 to allocate all the required buffer at once
 // #define INITIAL_RX_BUFFERS  0
 #define INITIAL_RX_BUFFERS 16
@@ -106,10 +111,16 @@ static void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER *pContext, pRxNetDe
 CParaNdisRX::CParaNdisRX()
 {
     InitializeListHead(&m_NetReceiveBuffers);
+    
+    // Initialize merge buffer context
+    NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
+    m_MergeContext.IsActive = FALSE;
 }
 
 CParaNdisRX::~CParaNdisRX()
 {
+    // Clean up any active merge context
+    CleanupMergeContext();
 }
 
 // called during initialization
@@ -650,11 +661,37 @@ VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
 
     while (NULL != (pBufferDescriptor = (pRxNetDescriptor)m_VirtQueue.GetBuf(&nFullLength)))
     {
-        PVOID data = pBufferDescriptor->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
-        data = RtlOffsetToPointer(data, pBufferDescriptor->DataStartOffset);
-
         RemoveEntryList(&pBufferDescriptor->listEntry);
         m_NetNofReceiveBuffers--;
+
+        // Check for merge buffer scenario if feature is enabled
+        if (m_Context->bUseMergedBuffers)
+        {
+            // Check if this is a merged buffer packet
+            virtio_net_hdr_mrg_rxbuf *pHeader = (virtio_net_hdr_mrg_rxbuf *)pBufferDescriptor->PhysicalPages[pBufferDescriptor->HeaderPage].Virtual;
+            UINT16 numBuffers = pHeader->num_buffers;
+            
+            if (numBuffers > 1)
+            {
+                // This is a multi-buffer packet, handle merge logic
+                if (ProcessMergedBuffers(pBufferDescriptor, nCurrCpuReceiveQueue))
+                {
+                    // Successfully processed merged packet, continue to next buffer
+                    continue;
+                }
+                else
+                {
+                    // Error in merge processing, treat as single buffer
+                    DPrintf(0, "Merge processing failed, reverting to single buffer mode");
+                    // Fall through to single buffer processing
+                }
+            }
+            // numBuffers == 1 or merge processing failed, handle as single buffer
+        }
+
+        // Single buffer processing (original logic)
+        PVOID data = pBufferDescriptor->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
+        data = RtlOffsetToPointer(data, pBufferDescriptor->DataStartOffset);
 
         // basic MAC-based analysis + L3 header info
         BOOLEAN packetAnalysisRC = ParaNdis_AnalyzeReceivedPacket(data,
@@ -787,3 +824,323 @@ VOID ParaNdis_ResetRxClassification(PARANDIS_ADAPTER *pContext)
     }
 }
 #endif
+
+//
+// Merge Buffer Implementation Functions
+//
+
+BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, CCHAR nCurrCpuReceiveQueue)
+{
+    virtio_net_hdr_mrg_rxbuf *pHeader = (virtio_net_hdr_mrg_rxbuf *)pFirstBuffer->PhysicalPages[pFirstBuffer->HeaderPage].Virtual;
+    UINT16 numBuffers = pHeader->num_buffers;
+    
+    // Validate buffer count with enhanced error handling
+    if (numBuffers < 2 || numBuffers > VIRTIO_NET_MAX_MRG_BUFS)
+    {
+        DPrintf(0, "Invalid buffer count in merge request: %d", numBuffers);
+        m_Context->extraStatistics.framesMergeErrors++;
+        // Ensure graceful failure handling
+        return FALSE;
+    }
+    
+    // Clean up any existing merge context (timeout case)
+    if (m_MergeContext.IsActive && IsMergeContextTimedOut())
+    {
+        DPrintf(0, "Merge context timeout detected, performing cleanup");
+        CleanupMergeContext();
+    }
+    
+    // Initialize new merge context
+    if (!m_MergeContext.IsActive)
+    {
+        NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
+        m_MergeContext.ExpectedBuffers = numBuffers;
+        m_MergeContext.CollectedBuffers = 0;
+        m_MergeContext.TotalPacketLength = 0;
+        m_MergeContext.IsActive = TRUE;
+        KeQuerySystemTime(&m_MergeContext.FirstBufferTimestamp);
+    }
+    
+    // Add first buffer to merge context
+    m_MergeContext.BufferSequence[m_MergeContext.CollectedBuffers] = pFirstBuffer;
+    m_MergeContext.CollectedBuffers++;
+    m_MergeContext.TotalPacketLength += pFirstBuffer->PacketInfo.dataLength;
+    
+    // Try to collect remaining buffers
+    if (CollectMergeBuffers(pFirstBuffer))
+    {
+        // All buffers collected, assemble the packet
+        pRxNetDescriptor pAssembledBuffer = AssembleMergedPacket();
+        if (pAssembledBuffer)
+        {
+            // Update statistics
+            m_Context->extraStatistics.framesMergedTotal++;
+            if (m_MergeContext.CollectedBuffers > m_Context->extraStatistics.framesMergeMaxBuffers)
+            {
+                m_Context->extraStatistics.framesMergeMaxBuffers = m_MergeContext.CollectedBuffers;
+            }
+            
+#if DBG
+            // Debug logging for merge buffer performance monitoring
+            LARGE_INTEGER currentInterruptTime;
+            KeQuerySystemTime(&currentInterruptTime);
+            DPrintf(3, "Merged packet: %d buffers, %d bytes total, sequence time: %I64d", 
+                    m_MergeContext.CollectedBuffers, 
+                    m_MergeContext.TotalPacketLength,
+                    (currentInterruptTime.QuadPart - m_MergeContext.FirstBufferTimestamp.QuadPart) / 10); // in microseconds
+#endif
+            
+            // Process the assembled packet through the normal path
+            PVOID data = pAssembledBuffer->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
+            data = RtlOffsetToPointer(data, pAssembledBuffer->DataStartOffset);
+            
+            BOOLEAN packetAnalysisRC = ParaNdis_AnalyzeReceivedPacket(data,
+                                                                      pAssembledBuffer->PacketInfo.dataLength,
+                                                                      &pAssembledBuffer->PacketInfo);
+            
+            if (packetAnalysisRC && ShallPassPacket(m_Context, &pAssembledBuffer->PacketInfo))
+            {
+                // Add to receive queue for processing
+#ifdef PARANDIS_SUPPORT_RSS
+                if (m_Context->RSSParameters.RSSMode != PARANDIS_RSS_MODE::PARANDIS_RSS_DISABLED)
+                {
+                    ParaNdis6_RSSAnalyzeReceivedPacket(&m_Context->RSSParameters, data, &pAssembledBuffer->PacketInfo);
+                }
+                
+                CCHAR nTargetReceiveQueueNum;
+                GROUP_AFFINITY TargetAffinity;
+                PROCESSOR_NUMBER TargetProcessor;
+                
+                nTargetReceiveQueueNum = ParaNdis_GetScalingDataForPacket(m_Context,
+                                                                          &pAssembledBuffer->PacketInfo,
+                                                                          &TargetProcessor);
+                
+                if (nTargetReceiveQueueNum == PARANDIS_RECEIVE_UNCLASSIFIED_PACKET)
+                {
+                    ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pAssembledBuffer);
+                    m_Context->extraStatistics.framesRSSUnclassified++;
+                }
+                else
+                {
+                    ParaNdis_ReceiveQueueAddBuffer(&m_Context->ReceiveQueues[nTargetReceiveQueueNum], pAssembledBuffer);
+                    
+                    if (nTargetReceiveQueueNum != nCurrCpuReceiveQueue)
+                    {
+                        if (m_Context->bPollModeEnabled)
+                        {
+                            KIRQL prev = KeRaiseIrqlToSynchLevel();
+                            ParaNdisPollNotify(m_Context, nTargetReceiveQueueNum, "RSS");
+                            KeLowerIrql(prev);
+                        }
+                        else
+                        {
+                            ParaNdis_ProcessorNumberToGroupAffinity(&TargetAffinity, &TargetProcessor);
+                            ParaNdis_QueueRSSDpc(m_Context, m_messageIndex, &TargetAffinity);
+                        }
+                        m_Context->extraStatistics.framesRSSMisses++;
+                    }
+                    else
+                    {
+                        m_Context->extraStatistics.framesRSSHits++;
+                    }
+                }
+#else
+                ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pAssembledBuffer);
+#endif
+            }
+            else
+            {
+                // Packet analysis failed or filtered out
+                ReuseReceiveBufferNoLock(pAssembledBuffer);
+                if (!packetAnalysisRC)
+                {
+                    m_Context->Statistics.ifInErrors++;
+                    m_Context->Statistics.ifInDiscards++;
+                }
+                else
+                {
+                    m_Context->Statistics.ifInDiscards++;
+                    m_Context->extraStatistics.framesFilteredOut++;
+                }
+            }
+            
+            CleanupMergeContext();
+            return TRUE;
+        }
+        else
+        {
+            // Assembly failed
+            CleanupMergeContext();
+            return FALSE;
+        }
+    }
+    
+    // Still collecting buffers, this is normal
+    return TRUE;
+}
+
+BOOLEAN CParaNdisRX::CollectMergeBuffers(pRxNetDescriptor pFirstBuffer)
+{
+    UNREFERENCED_PARAMETER(pFirstBuffer);
+    
+    unsigned int nFullLength;
+    pRxNetDescriptor pBufferDescriptor;
+    
+    // Try to collect remaining buffers from the queue
+    while (m_MergeContext.CollectedBuffers < m_MergeContext.ExpectedBuffers)
+    {
+        // Fast path: skip timeout check for first few buffers to improve performance
+        if (m_MergeContext.CollectedBuffers > MERGE_BUFFER_FAST_COLLECT_COUNT && 
+            IsMergeContextTimedOut())
+        {
+        DPrintf(0, "Merge buffer collection has timed out");
+            m_Context->extraStatistics.framesMergeTimeouts++;
+            return FALSE;
+        }
+        
+        // Try to get next buffer
+        pBufferDescriptor = (pRxNetDescriptor)m_VirtQueue.GetBuf(&nFullLength);
+        if (!pBufferDescriptor)
+        {
+            // No more buffers available yet - this is normal for incomplete sequences
+            return FALSE;
+        }
+        
+        RemoveEntryList(&pBufferDescriptor->listEntry);
+        m_NetNofReceiveBuffers--;
+        
+        // Add to merge context with enhanced bounds checking and resource limits
+        if (m_MergeContext.CollectedBuffers < VIRTIO_NET_MAX_MRG_BUFS && 
+            m_MergeContext.CollectedBuffers < m_MergeContext.ExpectedBuffers)
+        {
+            m_MergeContext.BufferSequence[m_MergeContext.CollectedBuffers] = pBufferDescriptor;
+            m_MergeContext.CollectedBuffers++;
+            
+            // Calculate actual data length (subtract header size for non-first buffers)
+            UINT32 dataLength = (m_MergeContext.CollectedBuffers == 1) ? 
+                nFullLength - m_Context->nVirtioHeaderSize : nFullLength;
+            m_MergeContext.TotalPacketLength += dataLength;
+        }
+        else
+        {
+            // Resource limit enforcement - too many buffers detected
+            DPrintf(0, "Excessive merge buffers detected: %d", m_MergeContext.CollectedBuffers);
+            m_Context->extraStatistics.framesMergeErrors++;
+            // Graceful failure handling with resource cleanup
+            ReuseReceiveBufferNoLock(pBufferDescriptor);
+            return FALSE;
+        }
+    }
+    
+    return TRUE;
+}
+
+pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
+{
+    if (!m_MergeContext.IsActive || m_MergeContext.CollectedBuffers == 0)
+    {
+        return NULL;
+    }
+    
+    // Use the first buffer as the base for the assembled packet
+    pRxNetDescriptor pAssembledBuffer = m_MergeContext.BufferSequence[0];
+    
+    // Update packet info with total length
+    pAssembledBuffer->PacketInfo.dataLength = m_MergeContext.TotalPacketLength;
+    
+    // For single buffer case, no chaining needed
+    if (m_MergeContext.CollectedBuffers == 1)
+    {
+        return pAssembledBuffer;
+    }
+    
+    // Multi-buffer case: create MDL chain
+    PMDL pPreviousMDL = NULL;
+    PMDL pCurrentMDL = pAssembledBuffer->Holder;
+    
+    // Find the end of the first buffer's MDL chain
+    while (pCurrentMDL)
+    {
+        pPreviousMDL = pCurrentMDL;
+        pCurrentMDL = NDIS_MDL_LINKAGE(pCurrentMDL);
+    }
+    
+    // Chain additional buffers' data pages (skip headers)
+    for (UINT i = 1; i < m_MergeContext.CollectedBuffers; i++)
+    {
+        pRxNetDescriptor pAdditionalBuffer = m_MergeContext.BufferSequence[i];
+        if (!pAdditionalBuffer)
+        {
+            continue;
+        }
+        
+        // Create MDLs for data pages of additional buffers (skip header page)
+        for (USHORT pageIdx = PARANDIS_FIRST_RX_DATA_PAGE; pageIdx < pAdditionalBuffer->NumPages; pageIdx++)
+        {
+            if (pAdditionalBuffer->PhysicalPages[pageIdx].Virtual)
+            {
+                PMDL pNewMDL = NdisAllocateMdl(m_Context->MiniportHandle,
+                                               pAdditionalBuffer->PhysicalPages[pageIdx].Virtual,
+                                               pAdditionalBuffer->PhysicalPages[pageIdx].size);
+                if (pNewMDL)
+                {
+                    if (pPreviousMDL)
+                    {
+                        NDIS_MDL_LINKAGE(pPreviousMDL) = pNewMDL;
+                    }
+                    else
+                    {
+                        // This should not happen as first buffer should have MDLs
+                        pAssembledBuffer->Holder = pNewMDL;
+                    }
+                    pPreviousMDL = pNewMDL;
+                }
+                else
+                {
+                    DPrintf(0, "MDL allocation failed during merge buffer assembly");
+                    // Continue with partial assembly
+                }
+            }
+        }
+        
+        // Mark additional buffer's MDL as NULL to prevent double-free
+        // We've created new MDLs pointing to the same physical memory
+        pAdditionalBuffer->Holder = NULL;
+    }
+    
+    return pAssembledBuffer;
+}
+
+void CParaNdisRX::CleanupMergeContext()
+{
+    if (m_MergeContext.IsActive)
+    {
+        // Return any collected buffers to the free pool (except the first one if successful)
+        for (UINT i = 1; i < m_MergeContext.CollectedBuffers; i++)
+        {
+            if (m_MergeContext.BufferSequence[i])
+            {
+                ReuseReceiveBufferNoLock(m_MergeContext.BufferSequence[i]);
+            }
+        }
+        
+        NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
+        m_MergeContext.IsActive = FALSE;
+    }
+}
+
+BOOLEAN CParaNdisRX::IsMergeContextTimedOut()
+{
+    if (!m_MergeContext.IsActive)
+    {
+        return FALSE;
+    }
+    
+    LARGE_INTEGER currentTime;
+    KeQuerySystemTime(&currentTime);
+    
+    LARGE_INTEGER elapsedTime;
+    elapsedTime.QuadPart = currentTime.QuadPart - m_MergeContext.FirstBufferTimestamp.QuadPart;
+    
+    return (elapsedTime.QuadPart > MERGE_BUFFER_TIMEOUT_TICKS);
+}

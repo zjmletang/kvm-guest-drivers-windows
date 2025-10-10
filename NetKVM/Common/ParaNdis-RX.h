@@ -66,7 +66,30 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
 
     PARANDIS_RECEIVE_QUEUE m_UnclassifiedPacketsQueue;
 
+    // Maximum number of buffers that can be merged (VirtIO spec limit)
+    #define VIRTIO_NET_MAX_MRG_BUFS 256
+    // Timeout for incomplete merge sequences (in 100ns units - 10ms)
+    #define MERGE_BUFFER_TIMEOUT_TICKS (10 * 10000)
+    // Fast path optimization - skip timeout check for first few buffers
+    #define MERGE_BUFFER_FAST_COLLECT_COUNT 4
+
+    // Merge buffer support structures
+    struct _MergeBufferContext
+    {
+        pRxNetDescriptor BufferSequence[VIRTIO_NET_MAX_MRG_BUFS];
+        UINT16 ExpectedBuffers;
+        UINT16 CollectedBuffers;
+        LARGE_INTEGER FirstBufferTimestamp;
+        UINT32 TotalPacketLength;
+        BOOLEAN IsActive;
+    } m_MergeContext;
+
     void ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor);
+    BOOLEAN ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, CCHAR nCurrCpuReceiveQueue);
+    BOOLEAN CollectMergeBuffers(pRxNetDescriptor pFirstBuffer);
+    pRxNetDescriptor AssembleMergedPacket();
+    void CleanupMergeContext();
+    BOOLEAN IsMergeContextTimedOut();
 
   private:
     int PrepareReceiveBuffers();
