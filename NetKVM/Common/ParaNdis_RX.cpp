@@ -216,8 +216,108 @@ int CParaNdisRX::PrepareReceiveBuffers()
     return nRet;
 }
 
+// Simplified buffer creation for mergeable buffers - just 1 page with header + data
+pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
+{
+    pRxNetDescriptor p = (pRxNetDescriptor)ParaNdis_AllocateMemory(m_Context, sizeof(*p));
+    if (p == NULL)
+    {
+        return NULL;
+    }
+
+    NdisZeroMemory(p, sizeof(*p));
+
+    // For mergeable buffers: 1 or 2 buffer descriptors depending on combineHeaderAndData
+    ULONG sgArraySize = m_Context->bAnyLayout ? 1 : 2;
+    p->BufferSGArray = (struct VirtIOBufferDescriptor *)ParaNdis_AllocateMemory(m_Context, 
+                                                                               sizeof(VirtIOBufferDescriptor) * sgArraySize);
+    if (p->BufferSGArray == NULL)
+    {
+        goto error_exit;
+    }
+
+    // Single physical page allocation (arrange PhysicalPages to match ParaNdis_BindRxBufferToPacket expectations)
+    // ParaNdis_BindRxBufferToPacket always starts from PARANDIS_FIRST_RX_DATA_PAGE (1)
+    // So PhysicalPages[0] should be header, PhysicalPages[1] should be data
+    p->PhysicalPages = (tCompletePhysicalAddress *)ParaNdis_AllocateMemory(m_Context, 
+                                                                           sizeof(tCompletePhysicalAddress) * 2);
+    if (p->PhysicalPages == NULL)
+    {
+        goto error_exit;
+    }
+
+    NdisZeroMemory(p->PhysicalPages, sizeof(tCompletePhysicalAddress) * 2);
+
+    // Allocate exactly 1 page for mergeable buffer
+    if (!ParaNdis_InitialAllocatePhysicalMemory(m_Context, PAGE_SIZE, &p->PhysicalPages[0]))
+    {
+        goto error_exit;
+    }
+
+    // Simple setup for mergeable buffer - arrange to match ParaNdis_BindRxBufferToPacket expectations
+    p->NumPages = 2;  // Always 2: PhysicalPages[0]=header, PhysicalPages[1]=data
+    p->HeaderPage = 0;  // Header at PhysicalPages[0]
+    
+    if (m_Context->bAnyLayout)
+    {
+        // Combined header and data in single buffer descriptor
+        p->BufferSGLength = 1;
+        p->DataStartOffset = (USHORT)m_Context->nVirtioHeaderSize;  // Offset past header to find data
+        
+        p->BufferSGArray[0].physAddr = p->PhysicalPages[0].Physical;
+        p->BufferSGArray[0].length = PAGE_SIZE;
+        
+        // Setup PhysicalPages[1] to point to data portion for ParaNdis_BindRxBufferToPacket
+        p->PhysicalPages[1].Physical.QuadPart = p->PhysicalPages[0].Physical.QuadPart + m_Context->RxLayout.ReserveForHeader;
+        p->PhysicalPages[1].Virtual = RtlOffsetToPointer(p->PhysicalPages[0].Virtual, m_Context->RxLayout.ReserveForHeader);
+        p->PhysicalPages[1].size = PAGE_SIZE - m_Context->RxLayout.ReserveForHeader;
+    }
+    else
+    {
+        // Separate header and data buffer descriptors
+        p->BufferSGLength = 2;
+        p->DataStartOffset = 0;  // Data starts at beginning of its own buffer
+        
+        // First SG entry: VirtIO header
+        p->BufferSGArray[0].physAddr = p->PhysicalPages[0].Physical;
+        p->BufferSGArray[0].length = m_Context->nVirtioHeaderSize;
+        
+        // Second SG entry: Data portion (same physical page, different offset)
+        // Create virtual "second page" entry pointing to data portion
+        p->PhysicalPages[1].Physical.QuadPart = p->PhysicalPages[0].Physical.QuadPart + m_Context->RxLayout.ReserveForHeader;
+        p->PhysicalPages[1].Virtual = RtlOffsetToPointer(p->PhysicalPages[0].Virtual, m_Context->RxLayout.ReserveForHeader);
+        p->PhysicalPages[1].size = PAGE_SIZE - m_Context->RxLayout.ReserveForHeader;
+        
+        p->BufferSGArray[1].physAddr = p->PhysicalPages[1].Physical;
+        p->BufferSGArray[1].length = p->PhysicalPages[1].size;
+    }
+
+    // No indirect area for mergeable buffers
+    p->IndirectArea.Physical.QuadPart = 0;
+    p->IndirectArea.Virtual = NULL;
+    p->IndirectArea.size = 0;
+
+    if (!ParaNdis_BindRxBufferToPacket(m_Context, p))
+    {
+        goto error_exit;
+    }
+
+    return p;
+
+error_exit:
+    ParaNdis_FreeRxBufferDescriptor(m_Context, p);
+    return NULL;
+}
+
 pRxNetDescriptor CParaNdisRX::CreateRxDescriptorOnInit()
 {
+    // For mergeable buffers, use simplified allocation - just 1 page per buffer
+    if (m_Context->bUseMergedBuffers)
+    {
+        return CreateMergeableRxDescriptor();
+    }
+    
+    // Original complex logic for non-mergeable buffers
     // For RX packets we allocate following pages
     //   X pages needed to fit most of data payload (or all the payload)
     //   1 page or less for virtio header, indirect buffers array and the data tail if any

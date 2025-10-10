@@ -1169,68 +1169,39 @@ static void PrepareRXLayout(PARANDIS_ADAPTER *pContext)
     // Optimize for mergeable buffers: Use smaller buffer size to encourage merging
     if (pContext->bUseMergedBuffers)
     {
-        // For mergeable buffers, use a smaller buffer size to encourage the device
-        // to split large packets across multiple buffers. This is the key to enabling
-        // the mergeable buffer feature.
+        // For mergeable buffers, use simplified layout: virtio header + data only
+        // No indirect area needed since each buffer is small and self-contained
         
-        // Recommended buffer size for optimal mergeable buffer performance:
-        // - 1 page (4KB) is ideal for most scenarios
-        // - Allows headers + ~3.5KB data per buffer
-        // - Large packets (e.g., 64KB jumbo frames) will be split across ~16 buffers
-        // - Balances memory efficiency with merge overhead
-        
-        ULONG mergeBufferDataSize;
+        // Simplified buffer layout for mergeable buffers:
+        // - 1 page (4KB) total size
+        // - virtio header at the beginning
+        // - remaining space for packet data
+        // - No indirect area needed
         
         if (combineHeaderAndData)
         {
             pContext->RxLayout.ReserveForHeader = 0;
-            // Leave room for virtio header within the page
-            mergeBufferDataSize = PAGE_SIZE - pContext->nVirtioHeaderSize - alignment;
+            // All space available for data including embedded header
+            rxPayloadSize = PAGE_SIZE;
         }
         else
         {
             pContext->RxLayout.ReserveForHeader = ALIGN_UP_BY(pContext->nVirtioHeaderSize, alignment);
-            // Leave room for header space and alignment
-            mergeBufferDataSize = PAGE_SIZE - pContext->RxLayout.ReserveForHeader - alignment;
+            // Remaining space after header for data
+            rxPayloadSize = PAGE_SIZE - pContext->RxLayout.ReserveForHeader;
         }
         
-        // Ensure we have reasonable minimum space for data
-        if (mergeBufferDataSize < 1024) {
-            DPrintf(0, "Warning: Very small merge buffer data size (%u bytes), mergeable buffers may be inefficient", mergeBufferDataSize);
-            mergeBufferDataSize = 1024;
-        }
+        // Simplified layout for mergeable buffers - clean and minimal
+        pContext->RxLayout.TotalAllocationsPerBuffer = 1;  // Single page
+        pContext->RxLayout.IndirectEntries = 0;            // No indirect descriptors
+        pContext->RxLayout.ReserveForIndirectArea = 0;     // No indirect area
+        pContext->RxLayout.HeaderPageAllocation = pContext->RxLayout.ReserveForHeader;  // Just header space
+        pContext->RxLayout.ReserveForPacketTail = 0;       // No tail concept
         
-        rxPayloadSize = mergeBufferDataSize;
-        
-        // Always allocate exactly 1 page for mergeable buffers
-        pContext->RxLayout.TotalAllocationsPerBuffer = 1;
-        pContext->RxLayout.IndirectEntries = 1; // Only one buffer descriptor needed
-        pContext->RxLayout.ReserveForIndirectArea = (USHORT)ALIGN_UP_BY(sizeof(VirtIOBufferDescriptor), alignment);
-        
-        ULONG calculatedHeaderAllocation = pContext->RxLayout.ReserveForHeader + 
-                                           pContext->RxLayout.ReserveForIndirectArea + 
-                                           rxPayloadSize;
-        pContext->RxLayout.HeaderPageAllocation = (USHORT)calculatedHeaderAllocation;
-        pContext->RxLayout.ReserveForPacketTail = (USHORT)rxPayloadSize;
-        
-        // Ensure power of 2 for efficient allocation
-        while (!IsPowerOfTwo(pContext->RxLayout.HeaderPageAllocation))
-        {
-            pContext->RxLayout.HeaderPageAllocation++;
-        }
-        
-        // Ensure we don't exceed page size
-        if (pContext->RxLayout.HeaderPageAllocation > PAGE_SIZE) {
-            DPrintf(0, "Warning: Merge buffer layout exceeds page size, adjusting");
-            pContext->RxLayout.HeaderPageAllocation = PAGE_SIZE;
-            pContext->RxLayout.ReserveForPacketTail = (USHORT)(PAGE_SIZE - pContext->RxLayout.ReserveForHeader - pContext->RxLayout.ReserveForIndirectArea);
-        }
-        
-        DPrintf(0, "Mergeable buffers: %u bytes data per buffer (header=%u, indirect=%u, data=%u)", 
-                (UINT)pContext->RxLayout.ReserveForPacketTail,
+        DPrintf(0, "Mergeable buffers: simplified layout - %u bytes header + %u bytes data in %u byte page", 
                 (UINT)pContext->RxLayout.ReserveForHeader,
-                (UINT)pContext->RxLayout.ReserveForIndirectArea,
-                (UINT)pContext->RxLayout.ReserveForPacketTail);
+                PAGE_SIZE - (UINT)pContext->RxLayout.ReserveForHeader,
+                PAGE_SIZE);
     }
     else
     {

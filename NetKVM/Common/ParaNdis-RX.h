@@ -94,6 +94,7 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
   private:
     int PrepareReceiveBuffers();
     pRxNetDescriptor CreateRxDescriptorOnInit();
+    pRxNetDescriptor CreateMergeableRxDescriptor();  // Simplified descriptor for mergeable buffers
     void RecalculateLimits();
 };
 
