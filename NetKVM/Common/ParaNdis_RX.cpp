@@ -146,6 +146,23 @@ bool CParaNdisRX::Create(PPARANDIS_ADAPTER Context, UINT DeviceQueueIndex)
         m_NetMaxReceiveBuffers = Context->maxRxBufferPerQueue;
     }
 
+    DPrintf(0, "[RX] CParaNdisRX::Create: Queue=%u, MaxBuffers=%u, MergeableBuffers=%s",
+            DeviceQueueIndex, m_NetMaxReceiveBuffers, 
+            Context->bUseMergedBuffers ? "ENABLED" : "DISABLED");
+    
+    if (Context->bUseMergedBuffers)
+    {
+        DPrintf(0, "[MERGEABLE] RX Queue configuration:");
+        DPrintf(0, "[MERGEABLE] - VirtIO header size: %u bytes", Context->nVirtioHeaderSize);
+        DPrintf(0, "[MERGEABLE] - Buffer size: %u bytes (1 page)", PAGE_SIZE);
+        DPrintf(0, "[MERGEABLE] - Data space per buffer: ~%u bytes", 
+                PAGE_SIZE - Context->RxLayout.ReserveForHeader);
+        DPrintf(0, "[MERGEABLE] - Layout mode: %s", 
+                Context->bAnyLayout ? "Combined (header+data)" : "Separate (header|data)");
+        DPrintf(0, "[MERGEABLE] - Expected merge for packets > %u bytes", 
+                PAGE_SIZE - Context->RxLayout.ReserveForHeader);
+    }
+
     if (!m_VirtQueue.Create(DeviceQueueIndex, &m_Context->IODevice, m_Context->MiniportHandle))
     {
         DPrintf(0, "CParaNdisRX::Create - virtqueue creation failed");
@@ -180,11 +197,15 @@ int CParaNdisRX::PrepareReceiveBuffers()
     UINT i;
     DEBUG_ENTRY(4);
 
+    DPrintf(1, "[RX] PrepareReceiveBuffers: Allocating %u buffers (mergeable=%d)", 
+            m_NetMaxReceiveBuffers, m_Context->bUseMergedBuffers);
+
     for (i = 0; i < m_NetMaxReceiveBuffers; ++i)
     {
         pRxNetDescriptor pBuffersDescriptor = CreateRxDescriptorOnInit();
         if (!pBuffersDescriptor)
         {
+            DPrintf(0, "[RX] ERROR: Failed to create RX descriptor %u/%u", i, m_NetMaxReceiveBuffers);
             break;
         }
 
@@ -192,6 +213,7 @@ int CParaNdisRX::PrepareReceiveBuffers()
 
         if (!AddRxBufferToQueue(pBuffersDescriptor))
         {
+            DPrintf(0, "[RX] ERROR: Failed to add buffer %u to queue", i);
             ParaNdis_FreeRxBufferDescriptor(m_Context, pBuffersDescriptor);
             break;
         }
@@ -205,6 +227,15 @@ int CParaNdisRX::PrepareReceiveBuffers()
     m_NetMaxReceiveBuffers = m_NetNofReceiveBuffers;
 
     RecalculateLimits();
+    
+    DPrintf(1, "[RX] Successfully allocated %u/%u RX buffers (mergeable=%d)", 
+            m_NetNofReceiveBuffers, m_NetMaxReceiveBuffers, m_Context->bUseMergedBuffers);
+    
+    // Show initial mergeable buffer statistics
+    if (m_Context->bUseMergedBuffers)
+    {
+        TraceMergeableStatistics();
+    }
 
     if (m_Context->extraStatistics.minFreeRxBuffers == 0 ||
         m_Context->extraStatistics.minFreeRxBuffers > m_NetNofReceiveBuffers)
@@ -219,9 +250,12 @@ int CParaNdisRX::PrepareReceiveBuffers()
 // Simplified buffer creation for mergeable buffers - just 1 page with header + data
 pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
 {
+    DPrintf(4, "[MERGEABLE] Creating mergeable RX descriptor (1 page buffer)");
+    
     pRxNetDescriptor p = (pRxNetDescriptor)ParaNdis_AllocateMemory(m_Context, sizeof(*p));
     if (p == NULL)
     {
+        DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate memory for RX descriptor");
         return NULL;
     }
 
@@ -233,6 +267,7 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
                                                                                sizeof(VirtIOBufferDescriptor) * sgArraySize);
     if (p->BufferSGArray == NULL)
     {
+        DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate SG array (size=%u)", sgArraySize);
         goto error_exit;
     }
 
@@ -243,6 +278,7 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
                                                                            sizeof(tCompletePhysicalAddress) * 2);
     if (p->PhysicalPages == NULL)
     {
+        DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate PhysicalPages array");
         goto error_exit;
     }
 
@@ -251,8 +287,12 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
     // Allocate exactly 1 page for mergeable buffer
     if (!ParaNdis_InitialAllocatePhysicalMemory(m_Context, PAGE_SIZE, &p->PhysicalPages[0]))
     {
+        DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate physical memory (1 page = %u bytes)", PAGE_SIZE);
         goto error_exit;
     }
+
+    DPrintf(4, "[MERGEABLE] Allocated 1 page: Virtual=%p, Physical=0x%llx", 
+            p->PhysicalPages[0].Virtual, p->PhysicalPages[0].Physical.QuadPart);
 
     // Simple setup for mergeable buffer - arrange to match ParaNdis_BindRxBufferToPacket expectations
     p->NumPages = 2;  // Always 2: PhysicalPages[0]=header, PhysicalPages[1]=data
@@ -271,6 +311,9 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
         p->PhysicalPages[1].Physical.QuadPart = p->PhysicalPages[0].Physical.QuadPart + m_Context->RxLayout.ReserveForHeader;
         p->PhysicalPages[1].Virtual = RtlOffsetToPointer(p->PhysicalPages[0].Virtual, m_Context->RxLayout.ReserveForHeader);
         p->PhysicalPages[1].size = PAGE_SIZE - m_Context->RxLayout.ReserveForHeader;
+        
+        DPrintf(4, "[MERGEABLE] Combined layout: SGLength=1, DataOffset=%u, DataSize=%u",
+                p->DataStartOffset, p->PhysicalPages[1].size);
     }
     else
     {
@@ -290,6 +333,9 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
         
         p->BufferSGArray[1].physAddr = p->PhysicalPages[1].Physical;
         p->BufferSGArray[1].length = p->PhysicalPages[1].size;
+        
+        DPrintf(4, "[MERGEABLE] Separate layout: SGLength=2, HeaderSize=%u, DataSize=%u",
+                m_Context->nVirtioHeaderSize, p->PhysicalPages[1].size);
     }
 
     // No indirect area for mergeable buffers
@@ -299,9 +345,12 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
 
     if (!ParaNdis_BindRxBufferToPacket(m_Context, p))
     {
+        DPrintf(0, "[MERGEABLE] ERROR: Failed to bind RX buffer to packet");
         goto error_exit;
     }
 
+    DPrintf(4, "[MERGEABLE] Successfully created mergeable RX descriptor: NumPages=%u, SGLength=%u",
+            p->NumPages, p->BufferSGLength);
     return p;
 
 error_exit:
@@ -314,9 +363,11 @@ pRxNetDescriptor CParaNdisRX::CreateRxDescriptorOnInit()
     // For mergeable buffers, use simplified allocation - just 1 page per buffer
     if (m_Context->bUseMergedBuffers)
     {
+        DPrintf(4, "[MERGEABLE] Using mergeable buffer allocation (small buffers to encourage merging)");
         return CreateMergeableRxDescriptor();
     }
     
+    DPrintf(4, "[NON-MERGEABLE] Using traditional buffer allocation (large buffers)");
     // Original complex logic for non-mergeable buffers
     // For RX packets we allocate following pages
     //   X pages needed to fit most of data payload (or all the payload)
@@ -457,6 +508,7 @@ BOOLEAN CParaNdisRX::AllocateMore()
     {
         return result;
     }
+    
     pRxNetDescriptor pBuffersDescriptor = CreateRxDescriptorOnInit();
 
     TPassiveSpinLocker autoLock(m_Lock);
@@ -472,11 +524,19 @@ BOOLEAN CParaNdisRX::AllocateMore()
             RecalculateLimits();
             KickRXRing();
             result = true;
+            
+            DPrintf(4, "[RX] Successfully allocated additional buffer: total=%u, max=%u",
+                    m_NetNofReceiveBuffers, m_NetMaxReceiveBuffers);
         }
         else
         {
+            DPrintf(0, "[RX] ERROR: Failed to add additional buffer to queue");
             ParaNdis_FreeRxBufferDescriptor(m_Context, pBuffersDescriptor);
         }
+    }
+    else
+    {
+        DPrintf(0, "[RX] ERROR: Failed to allocate additional RX descriptor");
     }
     return result;
 }
@@ -546,6 +606,24 @@ void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
 VOID CParaNdisRX::KickRXRing()
 {
     m_VirtQueue.Kick();
+}
+
+// Add a statistics tracing function for debugging
+void CParaNdisRX::TraceMergeableStatistics()
+{
+    if (m_Context->bUseMergedBuffers)
+    {
+        DPrintf(1, "[MERGEABLE STATS] Total merged packets: %u, Max buffers in packet: %u",
+                m_Context->extraStatistics.framesMergedTotal,
+                m_Context->extraStatistics.framesMergeMaxBuffers);
+        DPrintf(1, "[MERGEABLE STATS] Errors: %u, Timeouts: %u",
+                m_Context->extraStatistics.framesMergeErrors,
+                m_Context->extraStatistics.framesMergeTimeouts);
+        DPrintf(1, "[MERGEABLE STATS] RX buffers: %u free, %u max, %u min",
+                m_NetNofReceiveBuffers,
+                m_NetMaxReceiveBuffers,
+                m_Context->extraStatistics.minFreeRxBuffers);
+    }
 }
 
 #if PARANDIS_SUPPORT_RSS
@@ -771,20 +849,29 @@ VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
             virtio_net_hdr_mrg_rxbuf *pHeader = (virtio_net_hdr_mrg_rxbuf *)pBufferDescriptor->PhysicalPages[pBufferDescriptor->HeaderPage].Virtual;
             UINT16 numBuffers = pHeader->num_buffers;
             
+            DPrintf(5, "[MERGEABLE] Received buffer: numBuffers=%u, packetLength=%u", 
+                    numBuffers, nFullLength);
+            
             if (numBuffers > 1)
             {
+                DPrintf(3, "[MERGEABLE] Multi-buffer packet detected: %u buffers required", numBuffers);
                 // This is a multi-buffer packet, handle merge logic
                 if (ProcessMergedBuffers(pBufferDescriptor, nCurrCpuReceiveQueue))
                 {
                     // Successfully processed merged packet, continue to next buffer
+                    DPrintf(4, "[MERGEABLE] Successfully processed merged packet");
                     continue;
                 }
                 else
                 {
                     // Error in merge processing, treat as single buffer
-                    DPrintf(0, "Merge processing failed, reverting to single buffer mode");
+                    DPrintf(0, "[MERGEABLE] Merge processing failed, reverting to single buffer mode");
                     // Fall through to single buffer processing
                 }
+            }
+            else
+            {
+                DPrintf(5, "[MERGEABLE] Single buffer packet (no merge required)");
             }
             // numBuffers == 1 or merge processing failed, handle as single buffer
         }
@@ -934,10 +1021,13 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, CCHAR n
     virtio_net_hdr_mrg_rxbuf *pHeader = (virtio_net_hdr_mrg_rxbuf *)pFirstBuffer->PhysicalPages[pFirstBuffer->HeaderPage].Virtual;
     UINT16 numBuffers = pHeader->num_buffers;
     
+    DPrintf(3, "[MERGEABLE] ProcessMergedBuffers: Starting merge for %u buffers", numBuffers);
+    
     // Validate buffer count with enhanced error handling
     if (numBuffers < 2 || numBuffers > VIRTIO_NET_MAX_MRG_BUFS)
     {
-        DPrintf(0, "Invalid buffer count in merge request: %d", numBuffers);
+        DPrintf(0, "[MERGEABLE] ERROR: Invalid buffer count in merge request: %d (valid range: 2-%d)", 
+                numBuffers, VIRTIO_NET_MAX_MRG_BUFS);
         m_Context->extraStatistics.framesMergeErrors++;
         // Ensure graceful failure handling
         return FALSE;
@@ -946,13 +1036,14 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, CCHAR n
     // Clean up any existing merge context (timeout case)
     if (m_MergeContext.IsActive && IsMergeContextTimedOut())
     {
-        DPrintf(0, "Merge context timeout detected, performing cleanup");
+        DPrintf(0, "[MERGEABLE] WARNING: Merge context timeout detected, performing cleanup (previous sequence incomplete)");
         CleanupMergeContext();
     }
     
     // Initialize new merge context
     if (!m_MergeContext.IsActive)
     {
+        DPrintf(4, "[MERGEABLE] Initializing new merge context for %u buffers", numBuffers);
         NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
         m_MergeContext.ExpectedBuffers = numBuffers;
         m_MergeContext.CollectedBuffers = 0;
@@ -966,10 +1057,16 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, CCHAR n
     m_MergeContext.CollectedBuffers++;
     m_MergeContext.TotalPacketLength += pFirstBuffer->PacketInfo.dataLength;
     
+    DPrintf(4, "[MERGEABLE] Added first buffer (%u/%u), current total length: %u bytes",
+            m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers, m_MergeContext.TotalPacketLength);
+    
     // Try to collect remaining buffers
     if (CollectMergeBuffers(pFirstBuffer))
     {
         // All buffers collected, assemble the packet
+        DPrintf(3, "[MERGEABLE] All %u buffers collected, assembling packet (total: %u bytes)",
+                m_MergeContext.CollectedBuffers, m_MergeContext.TotalPacketLength);
+        
         pRxNetDescriptor pAssembledBuffer = AssembleMergedPacket();
         if (pAssembledBuffer)
         {
@@ -978,16 +1075,22 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, CCHAR n
             if (m_MergeContext.CollectedBuffers > m_Context->extraStatistics.framesMergeMaxBuffers)
             {
                 m_Context->extraStatistics.framesMergeMaxBuffers = m_MergeContext.CollectedBuffers;
+                DPrintf(2, "[MERGEABLE] New maximum buffer count record: %u buffers", 
+                        m_Context->extraStatistics.framesMergeMaxBuffers);
             }
+            
+            DPrintf(3, "[MERGEABLE] Successfully assembled packet: %u buffers -> %u bytes (total merged packets: %u)",
+                    m_MergeContext.CollectedBuffers, 
+                    m_MergeContext.TotalPacketLength,
+                    m_Context->extraStatistics.framesMergedTotal);
             
 #if DBG
             // Debug logging for merge buffer performance monitoring
             LARGE_INTEGER currentInterruptTime;
             KeQuerySystemTime(&currentInterruptTime);
-            DPrintf(3, "Merged packet: %d buffers, %d bytes total, sequence time: %I64d", 
-                    m_MergeContext.CollectedBuffers, 
-                    m_MergeContext.TotalPacketLength,
-                    (currentInterruptTime.QuadPart - m_MergeContext.FirstBufferTimestamp.QuadPart) / 10); // in microseconds
+            LONGLONG mergeTimeMicroseconds = (currentInterruptTime.QuadPart - m_MergeContext.FirstBufferTimestamp.QuadPart) / 10;
+            DPrintf(4, "[MERGEABLE] Merge timing: %I64d microseconds for %u buffers", 
+                    mergeTimeMicroseconds, m_MergeContext.CollectedBuffers);
 #endif
             
             // Process the assembled packet through the normal path
@@ -1086,6 +1189,11 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers(pRxNetDescriptor pFirstBuffer)
     unsigned int nFullLength;
     pRxNetDescriptor pBufferDescriptor;
     
+    DPrintf(5, "[MERGEABLE] CollectMergeBuffers: Collecting remaining %u buffers (have %u, need %u)",
+            m_MergeContext.ExpectedBuffers - m_MergeContext.CollectedBuffers,
+            m_MergeContext.CollectedBuffers,
+            m_MergeContext.ExpectedBuffers);
+    
     // Try to collect remaining buffers from the queue
     while (m_MergeContext.CollectedBuffers < m_MergeContext.ExpectedBuffers)
     {
@@ -1093,7 +1201,8 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers(pRxNetDescriptor pFirstBuffer)
         if (m_MergeContext.CollectedBuffers > MERGE_BUFFER_FAST_COLLECT_COUNT && 
             IsMergeContextTimedOut())
         {
-        DPrintf(0, "Merge buffer collection has timed out");
+            DPrintf(0, "[MERGEABLE] ERROR: Merge buffer collection timed out after %u collected (expected %u)",
+                    m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
             m_Context->extraStatistics.framesMergeTimeouts++;
             return FALSE;
         }
@@ -1103,11 +1212,16 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers(pRxNetDescriptor pFirstBuffer)
         if (!pBufferDescriptor)
         {
             // No more buffers available yet - this is normal for incomplete sequences
+            DPrintf(5, "[MERGEABLE] No more buffers available, waiting (have %u/%u)",
+                    m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
             return FALSE;
         }
         
         RemoveEntryList(&pBufferDescriptor->listEntry);
         m_NetNofReceiveBuffers--;
+        
+        DPrintf(5, "[MERGEABLE] Collected buffer %u/%u: length=%u bytes",
+                m_MergeContext.CollectedBuffers + 1, m_MergeContext.ExpectedBuffers, nFullLength);
         
         // Add to merge context with enhanced bounds checking and resource limits
         if (m_MergeContext.CollectedBuffers < VIRTIO_NET_MAX_MRG_BUFS && 
@@ -1120,11 +1234,15 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers(pRxNetDescriptor pFirstBuffer)
             UINT32 dataLength = (m_MergeContext.CollectedBuffers == 1) ? 
                 nFullLength - m_Context->nVirtioHeaderSize : nFullLength;
             m_MergeContext.TotalPacketLength += dataLength;
+            
+            DPrintf(5, "[MERGEABLE] Buffer %u added: dataLength=%u, totalLength=%u",
+                    m_MergeContext.CollectedBuffers, dataLength, m_MergeContext.TotalPacketLength);
         }
         else
         {
             // Resource limit enforcement - too many buffers detected
-            DPrintf(0, "Excessive merge buffers detected: %d", m_MergeContext.CollectedBuffers);
+            DPrintf(0, "[MERGEABLE] ERROR: Excessive merge buffers detected: %d (max allowed: %d)", 
+                    m_MergeContext.CollectedBuffers, VIRTIO_NET_MAX_MRG_BUFS);
             m_Context->extraStatistics.framesMergeErrors++;
             // Graceful failure handling with resource cleanup
             ReuseReceiveBufferNoLock(pBufferDescriptor);
@@ -1132,6 +1250,8 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers(pRxNetDescriptor pFirstBuffer)
         }
     }
     
+    DPrintf(4, "[MERGEABLE] All %u buffers collected successfully, total packet length: %u bytes",
+            m_MergeContext.CollectedBuffers, m_MergeContext.TotalPacketLength);
     return TRUE;
 }
 

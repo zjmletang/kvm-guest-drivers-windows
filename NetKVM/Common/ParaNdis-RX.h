@@ -90,6 +90,7 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
     pRxNetDescriptor AssembleMergedPacket();
     void CleanupMergeContext();
     BOOLEAN IsMergeContextTimedOut();
+    void TraceMergeableStatistics();  // Debug function to trace mergeable buffer statistics
 
   private:
     int PrepareReceiveBuffers();
