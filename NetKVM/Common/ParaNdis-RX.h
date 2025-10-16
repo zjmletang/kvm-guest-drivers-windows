@@ -85,7 +85,7 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
     } m_MergeContext;
 
     void ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor);
-    BOOLEAN ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, CCHAR nCurrCpuReceiveQueue);
+    BOOLEAN ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength, CCHAR nCurrCpuReceiveQueue);
     BOOLEAN CollectMergeBuffers(pRxNetDescriptor pFirstBuffer);
     pRxNetDescriptor AssembleMergedPacket();
     void CleanupMergeContext();

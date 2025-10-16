@@ -458,6 +458,17 @@ struct _tagRxNetDescriptor
     NET_PACKET_INFO PacketInfo;
 
     CParaNdisRX *Queue;
+    
+    // Mergeable buffer support - inline storage for merged buffers (no allocation needed)
+    // Semantics:
+    //   MergedBufferCount: Number of ADDITIONAL buffers merged (NOT including this descriptor)
+    //                      0 = not merged, >0 = merged packet
+    //   MergedBuffersInline: Stores additional buffers (NOT including this descriptor)
+    //                        Array size = MergedBufferCount (direct correspondence)
+    // Example: 3 buffers total => MergedBufferCount=2, MergedBuffersInline[0..1] has the other 2
+#define MAX_INLINE_MERGED_BUFFERS 16
+    USHORT MergedBufferCount;  // Number of additional buffers (this one excluded)
+    pRxNetDescriptor MergedBuffersInline[MAX_INLINE_MERGED_BUFFERS];  // Additional buffers (this one excluded)
 };
 
 struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
