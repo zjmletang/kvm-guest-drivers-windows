@@ -125,7 +125,7 @@ CParaNdisRX::CParaNdisRX()
 CParaNdisRX::~CParaNdisRX()
 {
     // Clean up any active merge context
-    CleanupMergeContext();
+    CleanupMergeContext(TRUE);
 }
 
 // called during initialization
@@ -1066,7 +1066,7 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nF
     if (m_MergeContext.IsActive && IsMergeContextTimedOut())
     {
         DPrintf(0, "[MERGEABLE] WARNING: Merge context timeout detected, performing cleanup (previous sequence incomplete)");
-        CleanupMergeContext();
+        CleanupMergeContext(TRUE);
     }
     
     // Initialize new merge context
@@ -1199,13 +1199,13 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nF
                 }
             }
             
-            CleanupMergeContext();
+            CleanupMergeContext(FALSE);
             return TRUE;
         }
         else
         {
             // Assembly failed
-            CleanupMergeContext();
+            CleanupMergeContext(TRUE);
             return FALSE;
         }
     }
@@ -1461,23 +1461,22 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     return pAssembledBuffer;
 }
 
-void CParaNdisRX::CleanupMergeContext()
+void CParaNdisRX::CleanupMergeContext(BOOLEAN returnBuffers)
 {
     if (m_MergeContext.IsActive)
     {
-        // Note: For successfully assembled packets, the merged buffers are now owned by
-        // pAssembledBuffer->MergedBuffersInline and will be freed when the NBL is returned.
-        // Only clean up on error/timeout cases where assembly didn't complete.
-        
-        // Return any collected buffers to the free pool
-        for (UINT i = 0; i < m_MergeContext.CollectedBuffers; i++)
+        if (returnBuffers)
         {
-            if (m_MergeContext.BufferSequence[i])
+            // Return any collected buffers to the free pool (error/timeout path)
+            for (UINT i = 0; i < m_MergeContext.CollectedBuffers; i++)
             {
-                ReuseReceiveBufferNoLock(m_MergeContext.BufferSequence[i]);
+                if (m_MergeContext.BufferSequence[i])
+                {
+                    ReuseReceiveBufferNoLock(m_MergeContext.BufferSequence[i]);
+                }
             }
         }
-        
+        // Reset context state
         NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
         m_MergeContext.IsActive = FALSE;
     }

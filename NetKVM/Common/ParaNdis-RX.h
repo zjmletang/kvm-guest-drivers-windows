@@ -88,7 +88,7 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
     BOOLEAN ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength, CCHAR nCurrCpuReceiveQueue);
     BOOLEAN CollectMergeBuffers(pRxNetDescriptor pFirstBuffer);
     pRxNetDescriptor AssembleMergedPacket();
-    void CleanupMergeContext();
+    void CleanupMergeContext(BOOLEAN returnBuffers);
     BOOLEAN IsMergeContextTimedOut();
     void TraceMergeableStatistics();  // Debug function to trace mergeable buffer statistics
 
