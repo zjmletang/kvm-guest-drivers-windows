@@ -88,7 +88,7 @@ static void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER *pContext, pRxNetDe
     ULONG i;
 
     ParaNdis_UnbindRxBufferFromPacket(p);
-    for (i = 0; i < p->NumPages; i++)
+    for (i = 0; i < p->NumOwnedPages; i++)
     {
         if (!p->PhysicalPages[i].Virtual)
         {
@@ -303,6 +303,7 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
     p->NumPages = 2;  // Always 2: PhysicalPages[0]=header, PhysicalPages[1]=data
     p->HeaderPage = 0;  // Header at PhysicalPages[0]
     p->DataStartOffset = 0;  // For subsequent buffers: full buffer is data (no header skip)
+    p->NumOwnedPages = p->NumPages;
     
     if (m_Context->bAnyLayout)
     {
@@ -348,6 +349,8 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
     p->IndirectArea.Physical.QuadPart = 0;
     p->IndirectArea.Virtual = NULL;
     p->IndirectArea.size = 0;
+
+    p->NumOwnedPages = p->NumPages;
 
     if (!ParaNdis_BindRxBufferToPacket(m_Context, p))
     {
@@ -485,10 +488,15 @@ pRxNetDescriptor CParaNdisRX::CreateRxDescriptorOnInit()
         // and was already allocated and counted
     }
 
+    p->NumOwnedPages = p->NumPages;
+
     if (!ParaNdis_BindRxBufferToPacket(m_Context, p))
     {
         goto error_exit;
     }
+
+    // Mark owned pages for cleanup (do not count borrowed pages from merge)
+    p->NumOwnedPages = p->NumPages;
 
     return p;
 

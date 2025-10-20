@@ -444,6 +444,7 @@ struct _tagRxNetDescriptor
     USHORT BufferSGLength;
     // number of configured pages
     USHORT NumPages;
+    USHORT NumOwnedPages;
     // might be 0 or 1 (if combined)
     USHORT HeaderPage;
     // data is always pages[1] but might
