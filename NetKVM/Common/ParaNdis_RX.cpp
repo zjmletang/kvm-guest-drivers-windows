@@ -601,6 +601,46 @@ void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
             }
         }
         
+        // CRITICAL: Restore the first buffer to its original state
+        // The PhysicalPages array and MDL chain were expanded during AssembleMergedPacket
+        if (m_Context->bUseMergedBuffers)
+        {
+            // Step 1: Free the extended MDL chain created during merge assembly
+            // The original buffer's MDL still exists and will be reused
+            // We only need to free MDLs for pages beyond the original 2 pages
+            PMDL pMDL = pBuffersDescriptor->Holder;
+            USHORT mdlCount = 0;
+            
+            // Skip the first buffer's original MDL (which covers the original 2 pages)
+            while (pMDL && mdlCount < 1)
+            {
+                pMDL = NDIS_MDL_LINKAGE(pMDL);
+                mdlCount++;
+            }
+            
+            // Free extended MDLs (for merged additional buffers)
+            while (pMDL)
+            {
+                PMDL pNextMDL = NDIS_MDL_LINKAGE(pMDL);
+                NdisFreeMdl(pMDL);
+                pMDL = pNextMDL;
+            }
+            
+            // Terminate the MDL chain after the first MDL
+            pMDL = pBuffersDescriptor->Holder;
+            if (pMDL)
+            {
+                NDIS_MDL_LINKAGE(pMDL) = NULL;
+            }
+            
+            // Step 2: Restore NumPages and NumOwnedPages to original values (2 for mergeable)
+            pBuffersDescriptor->NumPages = 2;
+            pBuffersDescriptor->NumOwnedPages = 2;
+            
+            DPrintf(5, "[MERGEABLE] Restored first buffer: NumPages=%u, NumOwnedPages=%u, extended MDLs freed",
+                    pBuffersDescriptor->NumPages, pBuffersDescriptor->NumOwnedPages);
+        }
+        
         // No need to free anything - inline array is part of the descriptor
         pBuffersDescriptor->MergedBufferCount = 0;
     }
