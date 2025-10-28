@@ -1091,6 +1091,7 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nF
     
     // Add first buffer to merge context
     m_MergeContext.BufferSequence[m_MergeContext.CollectedBuffers] = pFirstBuffer;
+    m_MergeContext.BufferActualLengths[m_MergeContext.CollectedBuffers] = nFullLength;  // Store actual received length
     m_MergeContext.CollectedBuffers++;
     // Calculate actual data length (subtract virtio header from first buffer)
     UINT32 firstBufferDataLength = nFullLength - m_Context->nVirtioHeaderSize;
@@ -1268,6 +1269,7 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers(pRxNetDescriptor pFirstBuffer)
             m_MergeContext.CollectedBuffers < m_MergeContext.ExpectedBuffers)
         {
             m_MergeContext.BufferSequence[m_MergeContext.CollectedBuffers] = pBufferDescriptor;
+            m_MergeContext.BufferActualLengths[m_MergeContext.CollectedBuffers] = nFullLength;  // Store actual received length
             m_MergeContext.CollectedBuffers++;
             
             // For subsequent buffers, all data is payload (no virtio header)
@@ -1394,15 +1396,19 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     for (UINT i = 1; i < m_MergeContext.CollectedBuffers; i++)
     {
         pRxNetDescriptor pBuffer = m_MergeContext.BufferSequence[i];
+        UINT32 actualBufferLength = m_MergeContext.BufferActualLengths[i];
         
         // Copy data pages (skip header page at index 0)
+        // Use actual received length for all pages from subsequent buffers
         for (USHORT srcPageIdx = PARANDIS_FIRST_RX_DATA_PAGE; 
              srcPageIdx < pBuffer->NumPages && destPageIdx < totalPages; 
              srcPageIdx++, destPageIdx++)
         {
             pAssembledBuffer->PhysicalPages[destPageIdx].Virtual = pBuffer->PhysicalPages[srcPageIdx].Virtual;
             pAssembledBuffer->PhysicalPages[destPageIdx].Physical = pBuffer->PhysicalPages[srcPageIdx].Physical;
-            pAssembledBuffer->PhysicalPages[destPageIdx].size = pBuffer->PhysicalPages[srcPageIdx].size;
+            // For mergeable buffers, subsequent buffers contain only payload data
+            // Use the actual received length directly
+            pAssembledBuffer->PhysicalPages[destPageIdx].size = actualBufferLength;
         }
     }
     
@@ -1435,9 +1441,11 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
         
         // For subsequent buffers: create MDL for FULL buffer (no header to skip)
         // The entire buffer is payload data, starting from PhysicalPages[0]
+        // Use actual received length instead of allocated buffer size
+        UINT32 actualBufferLength = m_MergeContext.BufferActualLengths[i];
         PMDL pNewMDL = NdisAllocateMdl(m_Context->MiniportHandle,
                                        pAdditionalBuffer->PhysicalPages[0].Virtual,
-                                       pAdditionalBuffer->PhysicalPages[0].size);
+                                       actualBufferLength);
         if (!pNewMDL)
         {
             DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate MDL for buffer %u", i);

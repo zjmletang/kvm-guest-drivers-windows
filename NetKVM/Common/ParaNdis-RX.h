@@ -77,6 +77,7 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
     struct _MergeBufferContext
     {
         pRxNetDescriptor BufferSequence[VIRTIO_NET_MAX_MRG_BUFS];
+        UINT32 BufferActualLengths[VIRTIO_NET_MAX_MRG_BUFS];  // Actual received length for each buffer
         UINT16 ExpectedBuffers;
         UINT16 CollectedBuffers;
         LARGE_INTEGER FirstBufferTimestamp;
