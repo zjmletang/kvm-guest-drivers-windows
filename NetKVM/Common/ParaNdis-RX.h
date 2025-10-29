@@ -77,14 +77,13 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
         UINT16 ExpectedBuffers;
         UINT16 CollectedBuffers;
         UINT32 TotalPacketLength;
-        BOOLEAN IsActive;
     } m_MergeContext;
 
     void ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor);
     pRxNetDescriptor ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength);
     BOOLEAN CollectMergeBuffers();
     pRxNetDescriptor AssembleMergedPacket();
-    void CleanupMergeContext(BOOLEAN returnBuffers);
+    void ReturnCollectedBuffers();
     void ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHAR nCurrCpuReceiveQueue);
     void TraceMergeableStatistics();  // Debug function to trace mergeable buffer statistics
 

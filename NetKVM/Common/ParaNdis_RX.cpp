@@ -119,13 +119,12 @@ CParaNdisRX::CParaNdisRX()
     
     // Initialize merge buffer context
     NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
-    m_MergeContext.IsActive = FALSE;
 }
 
 CParaNdisRX::~CParaNdisRX()
 {
     // Clean up any active merge context
-    CleanupMergeContext(TRUE);
+    ReturnCollectedBuffers();
 }
 
 // called during initialization
@@ -1121,23 +1120,10 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
     // Multi-buffer case - assemble the packet
     DPrintf(3, "Multi-buffer packet detected: %u buffers required", numBuffers);
     
-    // Clean up any existing incomplete merge context (error recovery)
-    // Per VirtIO spec, all buffers for a packet are atomically available
-    // If we have an active context, it indicates a previous error
-    if (m_MergeContext.IsActive)
-    {
-        DPrintf(0, "ERROR: Stale merge context detected, incomplete packet discarded (had %u/%u buffers)",
-                m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
-        m_Context->extraStatistics.framesMergeErrors++;
-        CleanupMergeContext(TRUE);
-    }
-    
-    // Initialize new merge context
-    NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
+    // Initialize merge context (only fields that need initialization)
     m_MergeContext.ExpectedBuffers = numBuffers;
     m_MergeContext.CollectedBuffers = 0;
     m_MergeContext.TotalPacketLength = 0;
-    m_MergeContext.IsActive = TRUE;
     
     // Add first buffer to merge context
     m_MergeContext.BufferSequence[m_MergeContext.CollectedBuffers] = pFirstBuffer;
@@ -1158,7 +1144,7 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
         DPrintf(0, "ERROR: Incomplete buffer collection (have %u/%u) - packet corrupted",
                 m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
         m_Context->extraStatistics.framesMergeErrors++;
-        CleanupMergeContext(TRUE);
+        ReturnCollectedBuffers();
         return NULL;
     }
     
@@ -1171,7 +1157,7 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
     {
         // Assembly failed
         DPrintf(0, "ERROR: Failed to assemble merged packet");
-        CleanupMergeContext(TRUE);
+        ReturnCollectedBuffers();
         return NULL;
     }
     
@@ -1189,7 +1175,8 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
             m_MergeContext.TotalPacketLength,
             m_Context->extraStatistics.framesMergedTotal);
     
-    CleanupMergeContext(FALSE);
+    // Note: Merge context cleanup not needed - buffers transferred to pAssembledBuffer
+    // and context will be reinitialized on next merge operation
     return pAssembledBuffer;
 }
 
@@ -1257,7 +1244,7 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
 
 pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
 {
-    if (!m_MergeContext.IsActive || m_MergeContext.CollectedBuffers == 0)
+    if (m_MergeContext.CollectedBuffers == 0)
     {
         return NULL;
     }
@@ -1437,23 +1424,15 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     return pAssembledBuffer;
 }
 
-void CParaNdisRX::CleanupMergeContext(BOOLEAN returnBuffers)
+void CParaNdisRX::ReturnCollectedBuffers()
 {
-    if (m_MergeContext.IsActive)
+    // Return any collected buffers to the free pool (error/cleanup path only)
+    for (UINT i = 0; i < m_MergeContext.CollectedBuffers; i++)
     {
-        if (returnBuffers)
+        if (m_MergeContext.BufferSequence[i])
         {
-            // Return any collected buffers to the free pool (error path)
-            for (UINT i = 0; i < m_MergeContext.CollectedBuffers; i++)
-            {
-                if (m_MergeContext.BufferSequence[i])
-                {
-                    ReuseReceiveBufferNoLock(m_MergeContext.BufferSequence[i]);
-                }
-            }
+            ReuseReceiveBufferNoLock(m_MergeContext.BufferSequence[i]);
         }
-        // Reset context state
-        NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
-        m_MergeContext.IsActive = FALSE;
     }
+    // Note: Context state will be reinitialized before next merge operation
 }
