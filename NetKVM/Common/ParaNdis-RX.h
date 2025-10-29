@@ -71,6 +71,9 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
     #define VIRTIO_NET_MAX_MRG_BUFS 17
 
     // Merge buffer support structures
+    // Pre-allocated PhysicalPages array to eliminate allocation in hot path
+    // Maximum: First buffer (2 pages) + additional buffers (16 * 1 page) = 18 pages
+    #define MAX_MERGED_PHYSICAL_PAGES 18
     struct _MergeBufferContext
     {
         pRxNetDescriptor BufferSequence[VIRTIO_NET_MAX_MRG_BUFS];
@@ -78,6 +81,9 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
         UINT16 ExpectedBuffers;
         UINT16 CollectedBuffers;
         UINT32 TotalPacketLength;
+        
+        // Pre-allocated array for merged packet assembly (eliminates allocate/copy/free in hot path)
+        tCompletePhysicalAddress InlinePhysicalPages[MAX_MERGED_PHYSICAL_PAGES];
     } m_MergeContext;
 
     void ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor);

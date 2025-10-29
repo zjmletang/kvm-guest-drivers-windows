@@ -288,6 +288,9 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
 
     NdisZeroMemory(p->PhysicalPages, sizeof(tCompletePhysicalAddress) * 2);
 
+    // Save original pointer for restoration after merge operations
+    p->OriginalPhysicalPages = p->PhysicalPages;
+
     // Allocate exactly 1 page for mergeable buffer
     if (!ParaNdis_InitialAllocatePhysicalMemory(m_Context, PAGE_SIZE, &p->PhysicalPages[0]))
     {
@@ -632,11 +635,18 @@ void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
                 NDIS_MDL_LINKAGE(pMDL) = NULL;
             }
             
-            // Step 2: Restore NumPages and NumOwnedPages to original values (2 for mergeable)
+            // Step 2: Restore PhysicalPages to original array
+            if (pBuffersDescriptor->PhysicalPages != pBuffersDescriptor->OriginalPhysicalPages)
+            {
+                // Was using inline array, restore to original small array
+                pBuffersDescriptor->PhysicalPages = pBuffersDescriptor->OriginalPhysicalPages;
+            }
+            
+            // Step 3: Restore NumPages and NumOwnedPages to original values (2 for mergeable)
             pBuffersDescriptor->NumPages = 2;
             pBuffersDescriptor->NumOwnedPages = 2;
             
-            DPrintf(5, "Restored first buffer: NumPages=%u, NumOwnedPages=%u, extended MDLs freed",
+            DPrintf(5, "Restored first buffer: NumPages=%u, NumOwnedPages=%u, PhysicalPages restored",
                     pBuffersDescriptor->NumPages, pBuffersDescriptor->NumOwnedPages);
         }
         
@@ -1310,25 +1320,26 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     }
     
     // Reallocate PhysicalPages array if needed to hold all pages
+    // Use pre-allocated inline array to eliminate allocation in hot path
     if (totalPages > pAssembledBuffer->NumPages)
     {
-        tCompletePhysicalAddress *pNewPhysicalPages = 
-            (tCompletePhysicalAddress *)ParaNdis_AllocateMemory(m_Context,
-                                                                sizeof(tCompletePhysicalAddress) * totalPages);
-        if (!pNewPhysicalPages)
+        // Switch to using pre-allocated inline array (no allocation needed!)
+        // Note: totalPages <= 18 is guaranteed by VirtIO spec and buffer size constraints
+        if (totalPages > MAX_MERGED_PHYSICAL_PAGES)
         {
-            DPrintf(0, "ERROR: Failed to allocate PhysicalPages array for %u pages", totalPages);
+            DPrintf(0, "CRITICAL: totalPages=%u exceeds MAX_MERGED_PHYSICAL_PAGES=%u - this should never happen!",
+                    totalPages, MAX_MERGED_PHYSICAL_PAGES);
             return NULL;
         }
         
-        // Copy existing pages from first buffer
-        NdisMoveMemory(pNewPhysicalPages, 
+        // Copy existing pages from first buffer to inline array
+        NdisMoveMemory(m_MergeContext.InlinePhysicalPages, 
                       pAssembledBuffer->PhysicalPages, 
                       sizeof(tCompletePhysicalAddress) * pAssembledBuffer->NumPages);
         
-        // Free old PhysicalPages array
-        NdisFreeMemory(pAssembledBuffer->PhysicalPages, 0, 0);
-        pAssembledBuffer->PhysicalPages = pNewPhysicalPages;
+        // No need to free - OriginalPhysicalPages will be restored on reuse
+        // Switch to inline array
+        pAssembledBuffer->PhysicalPages = m_MergeContext.InlinePhysicalPages;
     }
     
     // Rebuild PhysicalPages array

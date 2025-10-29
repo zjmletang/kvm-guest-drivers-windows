@@ -453,6 +453,7 @@ struct _tagRxNetDescriptor
 #define PARANDIS_FIRST_RX_DATA_PAGE (1)
     struct VirtIOBufferDescriptor *BufferSGArray;
     tCompletePhysicalAddress *PhysicalPages;
+    tCompletePhysicalAddress *OriginalPhysicalPages;  // Saved pointer for restoration after merge
     tCompletePhysicalAddress IndirectArea;
     tPacketHolderType Holder;
 
