@@ -260,7 +260,7 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
     pRxNetDescriptor p = (pRxNetDescriptor)ParaNdis_AllocateMemory(m_Context, sizeof(*p));
     if (p == NULL)
     {
-        DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate memory for RX descriptor");
+        DPrintf(0, "ERROR: Failed to allocate memory for RX descriptor");
         return NULL;
     }
 
@@ -272,7 +272,7 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
                                                                                sizeof(VirtIOBufferDescriptor) * sgArraySize);
     if (p->BufferSGArray == NULL)
     {
-        DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate SG array (size=%u)", sgArraySize);
+        DPrintf(0, "ERROR: Failed to allocate SG array (size=%u)", sgArraySize);
         goto error_exit;
     }
 
@@ -283,7 +283,7 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
                                                                            sizeof(tCompletePhysicalAddress) * 2);
     if (p->PhysicalPages == NULL)
     {
-        DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate PhysicalPages array");
+        DPrintf(0, "ERROR: Failed to allocate PhysicalPages array");
         goto error_exit;
     }
 
@@ -292,11 +292,11 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
     // Allocate exactly 1 page for mergeable buffer
     if (!ParaNdis_InitialAllocatePhysicalMemory(m_Context, PAGE_SIZE, &p->PhysicalPages[0]))
     {
-        DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate physical memory (1 page = %u bytes)", PAGE_SIZE);
+        DPrintf(0, "ERROR: Failed to allocate physical memory (1 page = %u bytes)", PAGE_SIZE);
         goto error_exit;
     }
 
-    DPrintf(4, "[MERGEABLE] Allocated 1 page: Virtual=%p, Physical=0x%llx", 
+    DPrintf(4, "Allocated 1 page: Virtual=%p, Physical=0x%llx", 
             p->PhysicalPages[0].Virtual, p->PhysicalPages[0].Physical.QuadPart);
 
     // Setup for mergeable buffer - arrange to match ParaNdis_BindRxBufferToPacket expectations
@@ -321,7 +321,7 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
         p->PhysicalPages[1].Virtual = p->PhysicalPages[0].Virtual;
         p->PhysicalPages[1].size = PAGE_SIZE;
         
-        DPrintf(4, "[MERGEABLE] Combined layout: SGLength=1, BufferSize=%u (full buffer)",
+        DPrintf(4, "Combined layout: SGLength=1, BufferSize=%u (full buffer)",
                 PAGE_SIZE);
     }
     else
@@ -341,7 +341,7 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
         p->BufferSGArray[1].physAddr = p->PhysicalPages[1].Physical;
         p->BufferSGArray[1].length = p->PhysicalPages[1].size;
         
-        DPrintf(4, "[MERGEABLE] Separate layout: SGLength=2, HeaderSize=%u, DataSize=%u",
+        DPrintf(4, "Separate layout: SGLength=2, HeaderSize=%u, DataSize=%u",
                 m_Context->nVirtioHeaderSize, PAGE_SIZE);
     }
 
@@ -354,11 +354,11 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
 
     if (!ParaNdis_BindRxBufferToPacket(m_Context, p))
     {
-        DPrintf(0, "[MERGEABLE] ERROR: Failed to bind RX buffer to packet");
+        DPrintf(0, "ERROR: Failed to bind RX buffer to packet");
         goto error_exit;
     }
 
-    DPrintf(4, "[MERGEABLE] Successfully created mergeable RX descriptor: NumPages=%u, SGLength=%u",
+    DPrintf(4, "Successfully created mergeable RX descriptor: NumPages=%u, SGLength=%u",
             p->NumPages, p->BufferSGLength);
     return p;
 
@@ -372,11 +372,11 @@ pRxNetDescriptor CParaNdisRX::CreateRxDescriptorOnInit()
     // For mergeable buffers, use simplified allocation - just 1 page per buffer
     if (m_Context->bUseMergedBuffers)
     {
-        DPrintf(4, "[MERGEABLE] Using mergeable buffer allocation (small buffers to encourage merging)");
+        DPrintf(4, "Using mergeable buffer allocation (small buffers to encourage merging)");
         return CreateMergeableRxDescriptor();
     }
     
-    DPrintf(4, "[NON-MERGEABLE] Using traditional buffer allocation (large buffers)");
+    DPrintf(4, "Using traditional buffer allocation (large buffers)");;
     // Original complex logic for non-mergeable buffers
     // For RX packets we allocate following pages
     //   X pages needed to fit most of data payload (or all the payload)
@@ -585,7 +585,7 @@ void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
     // Handle merged buffers: reuse all constituent buffers
     if (pBuffersDescriptor->MergedBufferCount > 0)
     {
-        DPrintf(4, "[MERGEABLE] Reusing merged packet with %u additional buffers", 
+        DPrintf(4, "Reusing merged packet with %u additional buffers", 
                 pBuffersDescriptor->MergedBufferCount);
         
         // Reuse additional buffers from inline array
@@ -637,7 +637,7 @@ void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
             pBuffersDescriptor->NumPages = 2;
             pBuffersDescriptor->NumOwnedPages = 2;
             
-            DPrintf(5, "[MERGEABLE] Restored first buffer: NumPages=%u, NumOwnedPages=%u, extended MDLs freed",
+            DPrintf(5, "Restored first buffer: NumPages=%u, NumOwnedPages=%u, extended MDLs freed",
                     pBuffersDescriptor->NumPages, pBuffersDescriptor->NumOwnedPages);
         }
         
@@ -690,12 +690,11 @@ void CParaNdisRX::TraceMergeableStatistics()
 {
     if (m_Context->bUseMergedBuffers)
     {
-        DPrintf(1, "[MERGEABLE STATS] Total merged packets: %u, Max buffers in packet: %u",
+        DPrintf(1, "Mergeable Stats: Total=%u, MaxBuffers=%u, Errors=%u",
                 m_Context->extraStatistics.framesMergedTotal,
-                m_Context->extraStatistics.framesMergeMaxBuffers);
-        DPrintf(1, "[MERGEABLE STATS] Errors: %u",
+                m_Context->extraStatistics.framesMergeMaxBuffers,
                 m_Context->extraStatistics.framesMergeErrors);
-        DPrintf(1, "[MERGEABLE STATS] RX buffers: %u free, %u max, %u min",
+        DPrintf(1, "RX Buffers: Free=%u, Max=%u, Min=%u",
                 m_NetNofReceiveBuffers,
                 m_NetMaxReceiveBuffers,
                 m_Context->extraStatistics.minFreeRxBuffers);
@@ -897,6 +896,89 @@ static void LogRedirectedPacket(pRxNetDescriptor pBufferDescriptor)
 }
 #endif
 
+// Common packet processing logic - extracted from ProcessRxRing and ProcessMergedBuffers
+// Handles packet analysis, filtering, RSS processing, and queue assignment
+void CParaNdisRX::ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHAR nCurrCpuReceiveQueue)
+{
+    // Get data pointer (skip virtio header)
+    PVOID data = pBufferDescriptor->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
+    data = RtlOffsetToPointer(data, pBufferDescriptor->DataStartOffset);
+
+    // Analyze packet (MAC-based analysis + L3 header info)
+    BOOLEAN packetAnalysisRC = ParaNdis_AnalyzeReceivedPacket(data,
+                                                              pBufferDescriptor->PacketInfo.dataLength,
+                                                              &pBufferDescriptor->PacketInfo);
+
+    if (!packetAnalysisRC)
+    {
+        ReuseReceiveBufferNoLock(pBufferDescriptor);
+        m_Context->Statistics.ifInErrors++;
+        m_Context->Statistics.ifInDiscards++;
+        return;
+    }
+
+    // Apply packet filtering
+    if (!ShallPassPacket(m_Context, &pBufferDescriptor->PacketInfo))
+    {
+        ReuseReceiveBufferNoLock(pBufferDescriptor);
+        m_Context->Statistics.ifInDiscards++;
+        m_Context->extraStatistics.framesFilteredOut++;
+        return;
+    }
+
+#ifdef PARANDIS_SUPPORT_RSS
+    // RSS hash analysis
+    if (m_Context->RSSParameters.RSSMode != PARANDIS_RSS_MODE::PARANDIS_RSS_DISABLED)
+    {
+        ParaNdis6_RSSAnalyzeReceivedPacket(&m_Context->RSSParameters, data, &pBufferDescriptor->PacketInfo);
+    }
+
+    // Determine target receive queue based on RSS
+    CCHAR nTargetReceiveQueueNum;
+    GROUP_AFFINITY TargetAffinity;
+    PROCESSOR_NUMBER TargetProcessor;
+
+    nTargetReceiveQueueNum = ParaNdis_GetScalingDataForPacket(m_Context,
+                                                              &pBufferDescriptor->PacketInfo,
+                                                              &TargetProcessor);
+
+    if (nTargetReceiveQueueNum == PARANDIS_RECEIVE_UNCLASSIFIED_PACKET)
+    {
+        ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pBufferDescriptor);
+        m_Context->extraStatistics.framesRSSUnclassified++;
+    }
+    else
+    {
+        ParaNdis_ReceiveQueueAddBuffer(&m_Context->ReceiveQueues[nTargetReceiveQueueNum], pBufferDescriptor);
+
+        if (nTargetReceiveQueueNum != nCurrCpuReceiveQueue)
+        {
+            // Cross-CPU packet - need to notify target queue
+            if (m_Context->bPollModeEnabled)
+            {
+                KIRQL prev = KeRaiseIrqlToSynchLevel();
+                ParaNdisPollNotify(m_Context, nTargetReceiveQueueNum, "RSS");
+                KeLowerIrql(prev);
+            }
+            else
+            {
+                ParaNdis_ProcessorNumberToGroupAffinity(&TargetAffinity, &TargetProcessor);
+                ParaNdis_QueueRSSDpc(m_Context, m_messageIndex, &TargetAffinity);
+            }
+            m_Context->extraStatistics.framesRSSMisses++;
+            LogRedirectedPacket(pBufferDescriptor);
+        }
+        else
+        {
+            m_Context->extraStatistics.framesRSSHits++;
+        }
+    }
+#else
+    UNREFERENCED_PARAMETER(nCurrCpuReceiveQueue);
+    ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pBufferDescriptor);
+#endif
+}
+
 VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
 {
     pRxNetDescriptor pBufferDescriptor;
@@ -918,114 +1000,28 @@ VOID CParaNdisRX::ProcessRxRing(CCHAR nCurrCpuReceiveQueue)
         RemoveEntryList(&pBufferDescriptor->listEntry);
         m_NetNofReceiveBuffers--;
 
-        // Check for merge buffer scenario if feature is enabled
+        pRxNetDescriptor pProcessBuffer = pBufferDescriptor;
+
+        // Mergeable buffer handling: always delegate to ProcessMergedBuffers if feature enabled
+        // It will handle both single-buffer (numBuffers=1) and multi-buffer (numBuffers>1) cases
         if (m_Context->bUseMergedBuffers)
         {
-            // Check if this is a merged buffer packet
-            virtio_net_hdr_mrg_rxbuf *pHeader = (virtio_net_hdr_mrg_rxbuf *)pBufferDescriptor->PhysicalPages[pBufferDescriptor->HeaderPage].Virtual;
-            UINT16 numBuffers = pHeader->num_buffers;
-            
-            DPrintf(5, "[MERGEABLE] Received buffer: numBuffers=%u, packetLength=%u", 
-                    numBuffers, nFullLength);
-            
-            if (numBuffers > 1)
+            pProcessBuffer = ProcessMergedBuffers(pBufferDescriptor, nFullLength);
+            if (!pProcessBuffer)
             {
-                DPrintf(3, "[MERGEABLE] Multi-buffer packet detected: %u buffers required", numBuffers);
-                // This is a multi-buffer packet, handle merge logic
-                if (ProcessMergedBuffers(pBufferDescriptor, nFullLength, nCurrCpuReceiveQueue))
-                {
-                    // Successfully processed merged packet, continue to next buffer
-                    DPrintf(4, "[MERGEABLE] Successfully processed merged packet");
-                    continue;
-                }
-                else
-                {
-                    // Error in merge processing, treat as single buffer
-                    DPrintf(0, "[MERGEABLE] Merge processing failed, reverting to single buffer mode");
-                    // Fall through to single buffer processing
-                }
+                // Assembly failed, already handled internally
+                continue;
             }
-            else
-            {
-                DPrintf(5, "[MERGEABLE] Single buffer packet (no merge required)");
-            }
-            // numBuffers == 1 or merge processing failed, handle as single buffer
-        }
-
-        // Single buffer processing (original logic)
-        PVOID data = pBufferDescriptor->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
-        data = RtlOffsetToPointer(data, pBufferDescriptor->DataStartOffset);
-
-        // basic MAC-based analysis + L3 header info
-        BOOLEAN packetAnalysisRC = ParaNdis_AnalyzeReceivedPacket(data,
-                                                                  nFullLength - m_Context->nVirtioHeaderSize,
-                                                                  &pBufferDescriptor->PacketInfo);
-
-        if (!packetAnalysisRC)
-        {
-            pBufferDescriptor->Queue->ReuseReceiveBufferNoLock(pBufferDescriptor);
-            m_Context->Statistics.ifInErrors++;
-            m_Context->Statistics.ifInDiscards++;
-            continue;
-        }
-
-        // filtering based on prev stage analysis
-        if (!ShallPassPacket(m_Context, &pBufferDescriptor->PacketInfo))
-        {
-            pBufferDescriptor->Queue->ReuseReceiveBufferNoLock(pBufferDescriptor);
-            m_Context->Statistics.ifInDiscards++;
-            m_Context->extraStatistics.framesFilteredOut++;
-            continue;
-        }
-#ifdef PARANDIS_SUPPORT_RSS
-        if (m_Context->RSSParameters.RSSMode != PARANDIS_RSS_MODE::PARANDIS_RSS_DISABLED)
-        {
-            ParaNdis6_RSSAnalyzeReceivedPacket(&m_Context->RSSParameters, data, &pBufferDescriptor->PacketInfo);
-        }
-        CCHAR nTargetReceiveQueueNum;
-        GROUP_AFFINITY TargetAffinity;
-        PROCESSOR_NUMBER TargetProcessor;
-
-        nTargetReceiveQueueNum = ParaNdis_GetScalingDataForPacket(m_Context,
-                                                                  &pBufferDescriptor->PacketInfo,
-                                                                  &TargetProcessor);
-
-        if (nTargetReceiveQueueNum == PARANDIS_RECEIVE_UNCLASSIFIED_PACKET)
-        {
-            ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pBufferDescriptor);
-            m_Context->extraStatistics.framesRSSUnclassified++;
         }
         else
         {
-            ParaNdis_ReceiveQueueAddBuffer(&m_Context->ReceiveQueues[nTargetReceiveQueueNum], pBufferDescriptor);
-
-            if (nTargetReceiveQueueNum != nCurrCpuReceiveQueue)
-            {
-                if (m_Context->bPollModeEnabled)
-                {
-                    // ensure the NDIS just schedules the other poll and does not do anything
-                    // otherwise if both polls are configured to the same CPU
-                    // this may cause a deadlock in return nbl path
-                    KIRQL prev = KeRaiseIrqlToSynchLevel();
-                    ParaNdisPollNotify(m_Context, nTargetReceiveQueueNum, "RSS");
-                    KeLowerIrql(prev);
-                }
-                else
-                {
-                    ParaNdis_ProcessorNumberToGroupAffinity(&TargetAffinity, &TargetProcessor);
-                    ParaNdis_QueueRSSDpc(m_Context, m_messageIndex, &TargetAffinity);
-                }
-                m_Context->extraStatistics.framesRSSMisses++;
-                LogRedirectedPacket(pBufferDescriptor);
-            }
-            else
-            {
-                m_Context->extraStatistics.framesRSSHits++;
-            }
+            // Non-mergeable mode: set packet data length (subtract virtio header)
+            pProcessBuffer->PacketInfo.dataLength = nFullLength - m_Context->nVirtioHeaderSize;
         }
-#else
-        ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pBufferDescriptor);
-#endif
+
+        // Unified processing path for both single and merged packets
+        // Note: For mergeable buffers, dataLength is already set in ProcessMergedBuffers
+        ProcessReceivedPacket(pProcessBuffer, nCurrCpuReceiveQueue);
     }
 }
 
@@ -1092,28 +1088,45 @@ VOID ParaNdis_ResetRxClassification(PARANDIS_ADAPTER *pContext)
 // Merge Buffer Implementation Functions
 //
 
-BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength, CCHAR nCurrCpuReceiveQueue)
+// ProcessMergedBuffers: Pure assembly function
+// Handles both single-buffer and multi-buffer packets when mergeable feature is enabled
+// Returns assembled descriptor or original descriptor (for single buffer) or NULL on failure
+// Does NOT process the packet - caller is responsible for calling ProcessReceivedPacket
+pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength)
 {
     virtio_net_hdr_mrg_rxbuf *pHeader = (virtio_net_hdr_mrg_rxbuf *)pFirstBuffer->PhysicalPages[pFirstBuffer->HeaderPage].Virtual;
     UINT16 numBuffers = pHeader->num_buffers;
     
-    DPrintf(3, "[MERGEABLE] ProcessMergedBuffers: Starting merge for %u buffers", numBuffers);
+    DPrintf(5, "ProcessMergedBuffers: numBuffers=%u, packetLength=%u", numBuffers, nFullLength);
     
-    // Validate buffer count with enhanced error handling
-    if (numBuffers < 2 || numBuffers > VIRTIO_NET_MAX_MRG_BUFS)
+    // Validate buffer count
+    if (numBuffers == 0 || numBuffers > VIRTIO_NET_MAX_MRG_BUFS)
     {
-        DPrintf(0, "[MERGEABLE] ERROR: Invalid buffer count in merge request: %d (valid range: 2-%d)", 
+        DPrintf(0, "ERROR: Invalid buffer count: %d (valid range: 1-%d)", 
                 numBuffers, VIRTIO_NET_MAX_MRG_BUFS);
         m_Context->extraStatistics.framesMergeErrors++;
-        return FALSE;
+        ReuseReceiveBufferNoLock(pFirstBuffer);
+        return NULL;
     }
+    
+    // Single buffer case - no assembly needed, just return the original
+    if (numBuffers == 1)
+    {
+        DPrintf(5, "Single buffer packet (no merge required)");
+        // Set packet data length for single buffer (subtract virtio header)
+        pFirstBuffer->PacketInfo.dataLength = nFullLength - m_Context->nVirtioHeaderSize;
+        return pFirstBuffer;
+    }
+    
+    // Multi-buffer case - assemble the packet
+    DPrintf(3, "Multi-buffer packet detected: %u buffers required", numBuffers);
     
     // Clean up any existing incomplete merge context (error recovery)
     // Per VirtIO spec, all buffers for a packet are atomically available
     // If we have an active context, it indicates a previous error
     if (m_MergeContext.IsActive)
     {
-        DPrintf(0, "[MERGEABLE] ERROR: Stale merge context detected, incomplete packet discarded (had %u/%u buffers)",
+        DPrintf(0, "ERROR: Stale merge context detected, incomplete packet discarded (had %u/%u buffers)",
                 m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
         m_Context->extraStatistics.framesMergeErrors++;
         CleanupMergeContext(TRUE);
@@ -1128,132 +1141,56 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nF
     
     // Add first buffer to merge context
     m_MergeContext.BufferSequence[m_MergeContext.CollectedBuffers] = pFirstBuffer;
-    m_MergeContext.BufferActualLengths[m_MergeContext.CollectedBuffers] = nFullLength;  // Store actual received length
+    m_MergeContext.BufferActualLengths[m_MergeContext.CollectedBuffers] = nFullLength;
     m_MergeContext.CollectedBuffers++;
     // Calculate actual data length (subtract virtio header from first buffer)
     UINT32 firstBufferDataLength = nFullLength - m_Context->nVirtioHeaderSize;
     pFirstBuffer->PacketInfo.dataLength = firstBufferDataLength;
     m_MergeContext.TotalPacketLength += firstBufferDataLength;
     
-    DPrintf(4, "[MERGEABLE] Added first buffer (%u/%u), current total length: %u bytes",
+    DPrintf(4, "Added first buffer (%u/%u), current total length: %u bytes",
             m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers, m_MergeContext.TotalPacketLength);
     
-    // Try to collect remaining buffers
-    if (CollectMergeBuffers())
+    // Collect remaining buffers
+    if (!CollectMergeBuffers())
     {
-        // All buffers collected, assemble the packet
-        DPrintf(3, "[MERGEABLE] All %u buffers collected, assembling packet (total: %u bytes)",
-                m_MergeContext.CollectedBuffers, m_MergeContext.TotalPacketLength);
-        
-        pRxNetDescriptor pAssembledBuffer = AssembleMergedPacket();
-        if (pAssembledBuffer)
-        {
-            // Update statistics
-            m_Context->extraStatistics.framesMergedTotal++;
-            if (m_MergeContext.CollectedBuffers > m_Context->extraStatistics.framesMergeMaxBuffers)
-            {
-                m_Context->extraStatistics.framesMergeMaxBuffers = m_MergeContext.CollectedBuffers;
-                DPrintf(2, "[MERGEABLE] New maximum buffer count record: %u buffers", 
-                        m_Context->extraStatistics.framesMergeMaxBuffers);
-            }
-            
-            DPrintf(3, "[MERGEABLE] Successfully assembled packet: %u buffers -> %u bytes (total merged packets: %u)",
-                    m_MergeContext.CollectedBuffers, 
-                    m_MergeContext.TotalPacketLength,
-                    m_Context->extraStatistics.framesMergedTotal);
-            
-            // Process the assembled packet through the normal path
-            PVOID data = pAssembledBuffer->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
-            data = RtlOffsetToPointer(data, pAssembledBuffer->DataStartOffset);
-            
-            BOOLEAN packetAnalysisRC = ParaNdis_AnalyzeReceivedPacket(data,
-                                                                      pAssembledBuffer->PacketInfo.dataLength,
-                                                                      &pAssembledBuffer->PacketInfo);
-            
-            if (packetAnalysisRC && ShallPassPacket(m_Context, &pAssembledBuffer->PacketInfo))
-            {
-                // Add to receive queue for processing
-#ifdef PARANDIS_SUPPORT_RSS
-                if (m_Context->RSSParameters.RSSMode != PARANDIS_RSS_MODE::PARANDIS_RSS_DISABLED)
-                {
-                    ParaNdis6_RSSAnalyzeReceivedPacket(&m_Context->RSSParameters, data, &pAssembledBuffer->PacketInfo);
-                }
-                
-                CCHAR nTargetReceiveQueueNum;
-                GROUP_AFFINITY TargetAffinity;
-                PROCESSOR_NUMBER TargetProcessor;
-                
-                nTargetReceiveQueueNum = ParaNdis_GetScalingDataForPacket(m_Context,
-                                                                          &pAssembledBuffer->PacketInfo,
-                                                                          &TargetProcessor);
-                
-                if (nTargetReceiveQueueNum == PARANDIS_RECEIVE_UNCLASSIFIED_PACKET)
-                {
-                    ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pAssembledBuffer);
-                    m_Context->extraStatistics.framesRSSUnclassified++;
-                }
-                else
-                {
-                    ParaNdis_ReceiveQueueAddBuffer(&m_Context->ReceiveQueues[nTargetReceiveQueueNum], pAssembledBuffer);
-                    
-                    if (nTargetReceiveQueueNum != nCurrCpuReceiveQueue)
-                    {
-                        if (m_Context->bPollModeEnabled)
-                        {
-                            KIRQL prev = KeRaiseIrqlToSynchLevel();
-                            ParaNdisPollNotify(m_Context, nTargetReceiveQueueNum, "RSS");
-                            KeLowerIrql(prev);
-                        }
-                        else
-                        {
-                            ParaNdis_ProcessorNumberToGroupAffinity(&TargetAffinity, &TargetProcessor);
-                            ParaNdis_QueueRSSDpc(m_Context, m_messageIndex, &TargetAffinity);
-                        }
-                        m_Context->extraStatistics.framesRSSMisses++;
-                    }
-                    else
-                    {
-                        m_Context->extraStatistics.framesRSSHits++;
-                    }
-                }
-#else
-                ParaNdis_ReceiveQueueAddBuffer(&m_UnclassifiedPacketsQueue, pAssembledBuffer);
-#endif
-            }
-            else
-            {
-                // Packet analysis failed or filtered out
-                ReuseReceiveBufferNoLock(pAssembledBuffer);
-                if (!packetAnalysisRC)
-                {
-                    m_Context->Statistics.ifInErrors++;
-                    m_Context->Statistics.ifInDiscards++;
-                }
-                else
-                {
-                    m_Context->Statistics.ifInDiscards++;
-                    m_Context->extraStatistics.framesFilteredOut++;
-                }
-            }
-            
-            CleanupMergeContext(FALSE);
-            return TRUE;
-        }
-        else
-        {
-            // Assembly failed
-            CleanupMergeContext(TRUE);
-            return FALSE;
-        }
+        // Failed to collect all buffers - protocol violation
+        DPrintf(0, "ERROR: Incomplete buffer collection (have %u/%u) - packet corrupted",
+                m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
+        m_Context->extraStatistics.framesMergeErrors++;
+        CleanupMergeContext(TRUE);
+        return NULL;
     }
     
-    // Failed to collect all buffers - this should never happen per VirtIO spec
-    // All buffers for a merged packet must be atomically available
-    DPrintf(0, "[MERGEABLE] ERROR: Incomplete buffer collection (have %u/%u) - packet corrupted",
-            m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
-    m_Context->extraStatistics.framesMergeErrors++;
-    CleanupMergeContext(TRUE);
-    return FALSE;
+    // All buffers collected, assemble the packet
+    DPrintf(3, "All %u buffers collected, assembling packet (total: %u bytes)",
+            m_MergeContext.CollectedBuffers, m_MergeContext.TotalPacketLength);
+    
+    pRxNetDescriptor pAssembledBuffer = AssembleMergedPacket();
+    if (!pAssembledBuffer)
+    {
+        // Assembly failed
+        DPrintf(0, "ERROR: Failed to assemble merged packet");
+        CleanupMergeContext(TRUE);
+        return NULL;
+    }
+    
+    // Update statistics
+    m_Context->extraStatistics.framesMergedTotal++;
+    if (m_MergeContext.CollectedBuffers > m_Context->extraStatistics.framesMergeMaxBuffers)
+    {
+        m_Context->extraStatistics.framesMergeMaxBuffers = m_MergeContext.CollectedBuffers;
+        DPrintf(2, "New maximum buffer count record: %u buffers", 
+                m_Context->extraStatistics.framesMergeMaxBuffers);
+    }
+    
+    DPrintf(3, "Successfully assembled packet: %u buffers -> %u bytes (total merged packets: %u)",
+            m_MergeContext.CollectedBuffers, 
+            m_MergeContext.TotalPacketLength,
+            m_Context->extraStatistics.framesMergedTotal);
+    
+    CleanupMergeContext(FALSE);
+    return pAssembledBuffer;
 }
 
 BOOLEAN CParaNdisRX::CollectMergeBuffers()
@@ -1261,7 +1198,7 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
     unsigned int nFullLength;
     pRxNetDescriptor pBufferDescriptor;
     
-    DPrintf(5, "[MERGEABLE] Collecting remaining %u buffers (have %u, need %u)",
+    DPrintf(5, "Collecting remaining %u buffers (have %u, need %u)",
             m_MergeContext.ExpectedBuffers - m_MergeContext.CollectedBuffers,
             m_MergeContext.CollectedBuffers,
             m_MergeContext.ExpectedBuffers);
@@ -1275,7 +1212,7 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
         if (!pBufferDescriptor)
         {
             // Buffer unavailable = protocol violation or device error
-            DPrintf(0, "[MERGEABLE] ERROR: Buffer %u/%u unavailable - VirtIO protocol violation",
+            DPrintf(0, "ERROR: Buffer %u/%u unavailable - VirtIO protocol violation",
                     m_MergeContext.CollectedBuffers + 1, m_MergeContext.ExpectedBuffers);
             m_Context->extraStatistics.framesMergeErrors++;
             return FALSE;
@@ -1284,7 +1221,7 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
         RemoveEntryList(&pBufferDescriptor->listEntry);
         m_NetNofReceiveBuffers--;
         
-        DPrintf(5, "[MERGEABLE] Collected buffer %u/%u: length=%u bytes",
+        DPrintf(5, "Collected buffer %u/%u: length=%u bytes",
                 m_MergeContext.CollectedBuffers + 1, m_MergeContext.ExpectedBuffers, nFullLength);
         
         // Add to merge context with enhanced bounds checking and resource limits
@@ -1298,13 +1235,13 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
             // For subsequent buffers, all data is payload (no virtio header)
             m_MergeContext.TotalPacketLength += nFullLength;
             
-            DPrintf(5, "[MERGEABLE] Buffer %u added: dataLength=%u, totalLength=%u",
+            DPrintf(5, "Buffer %u added: dataLength=%u, totalLength=%u",
                     m_MergeContext.CollectedBuffers, nFullLength, m_MergeContext.TotalPacketLength);
         }
         else
         {
             // Resource limit enforcement - too many buffers detected
-            DPrintf(0, "[MERGEABLE] ERROR: Excessive merge buffers detected: %d (max allowed: %d)", 
+            DPrintf(0, "ERROR: Excessive merge buffers detected: %d (max allowed: %d)", 
                     m_MergeContext.CollectedBuffers, VIRTIO_NET_MAX_MRG_BUFS);
             m_Context->extraStatistics.framesMergeErrors++;
             // Graceful failure handling with resource cleanup
@@ -1313,7 +1250,7 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
         }
     }
     
-    DPrintf(4, "[MERGEABLE] All %u buffers collected successfully, total packet length: %u bytes",
+    DPrintf(4, "All %u buffers collected successfully, total packet length: %u bytes",
             m_MergeContext.CollectedBuffers, m_MergeContext.TotalPacketLength);
     return TRUE;
 }
@@ -1345,7 +1282,7 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     // CRITICAL: Prevent buffer overflow - inline array has limited capacity
     if (additionalBuffers > MAX_INLINE_MERGED_BUFFERS)
     {
-        DPrintf(0, "[MERGEABLE] ERROR: Too many merged buffers %u (max inline: %u) - dropping packet",
+        DPrintf(0, "ERROR: Too many merged buffers %u (max inline: %u) - dropping packet",
                 m_MergeContext.CollectedBuffers, MAX_INLINE_MERGED_BUFFERS + 1);
         m_Context->extraStatistics.framesMergeErrors++;
         
@@ -1400,7 +1337,7 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
                                                                 sizeof(tCompletePhysicalAddress) * totalPages);
         if (!pNewPhysicalPages)
         {
-            DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate PhysicalPages array for %u pages", totalPages);
+            DPrintf(0, "ERROR: Failed to allocate PhysicalPages array for %u pages", totalPages);
             return NULL;
         }
         
@@ -1471,7 +1408,7 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
                                        actualBufferLength);
         if (!pNewMDL)
         {
-            DPrintf(0, "[MERGEABLE] ERROR: Failed to allocate MDL for buffer %u", i);
+            DPrintf(0, "ERROR: Failed to allocate MDL for buffer %u", i);
             // Continue with what we have - partial packet better than nothing
             continue;
         }
@@ -1494,7 +1431,7 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
         // The new MDL we created will be freed when pAssembledBuffer's packet is returned
     }
     
-    DPrintf(4, "[MERGEABLE] Assembled packet: %u buffers, %u total pages, %u bytes",
+    DPrintf(4, "Assembled packet: %u buffers, %u total pages, %u bytes",
             m_MergeContext.CollectedBuffers, totalPages, m_MergeContext.TotalPacketLength);
     
     return pAssembledBuffer;

@@ -892,15 +892,15 @@ NDIS_STATUS ParaNdis_InitializeContext(PARANDIS_ADAPTER *pContext, PNDIS_RESOURC
         InitializeMaxMTUConfig(pContext);
 
         pContext->bUseMergedBuffers = AckFeature(pContext, VIRTIO_NET_F_MRG_RXBUF);
-        DPrintf(0, "[MERGEABLE] VirtIO Mergeable Receive Buffers feature: %s", 
+        DPrintf(0, "VirtIO Mergeable Receive Buffers: %s", 
                 pContext->bUseMergedBuffers ? "NEGOTIATED" : "NOT AVAILABLE");
         if (pContext->bUseMergedBuffers)
         {
-            DPrintf(0, "[MERGEABLE] Feature enabled - will use small buffers to encourage packet merging");
+            DPrintf(0, "Feature enabled - will use small buffers to encourage packet merging");
         }
         pContext->nVirtioHeaderSize = (pContext->bUseMergedBuffers) ? sizeof(virtio_net_hdr_mrg_rxbuf)
                                                                     : sizeof(virtio_net_hdr);
-        DPrintf(0, "[MERGEABLE] VirtIO header size: %u bytes (mergeable=%d)", 
+        DPrintf(0, "VirtIO header size: %u bytes (mergeable=%d)", 
                 pContext->nVirtioHeaderSize, pContext->bUseMergedBuffers);
         AckFeature(pContext, VIRTIO_RING_F_EVENT_IDX);
     }
@@ -1178,7 +1178,7 @@ static void PrepareRXLayout(PARANDIS_ADAPTER *pContext)
     // Optimize for mergeable buffers: Use smaller buffer size to encourage merging
     if (pContext->bUseMergedBuffers)
     {
-        DPrintf(0, "[MERGEABLE] Configuring optimized layout for mergeable buffers (VIRTIO_NET_F_MRG_RXBUF)");
+        DPrintf(0, "Configuring optimized layout for mergeable buffers (VIRTIO_NET_F_MRG_RXBUF)");
         // For mergeable buffers, use simplified layout: virtio header + data only
         // No indirect area needed since each buffer is small and self-contained
         
@@ -1208,16 +1208,16 @@ static void PrepareRXLayout(PARANDIS_ADAPTER *pContext)
         pContext->RxLayout.HeaderPageAllocation = pContext->RxLayout.ReserveForHeader;  // Just header space
         pContext->RxLayout.ReserveForPacketTail = 0;       // No tail concept
         
-        DPrintf(0, "[MERGEABLE] Layout configured: TotalAllocations=%u, HeaderAllocation=%u, ReserveForHeader=%u, VirtioHeaderSize=%u",
+        DPrintf(0, "Layout configured: TotalAllocations=%u, HeaderAllocation=%u, ReserveForHeader=%u, VirtioHeaderSize=%u",
                 pContext->RxLayout.TotalAllocationsPerBuffer,
                 pContext->RxLayout.HeaderPageAllocation,
                 pContext->RxLayout.ReserveForHeader,
                 pContext->nVirtioHeaderSize);
-        DPrintf(0, "[MERGEABLE] Buffer data space per buffer: %u bytes (PageSize=%u - HeaderReserve=%u)",
+        DPrintf(0, "Buffer data space per buffer: %u bytes (PageSize=%u - HeaderReserve=%u)",
                 PAGE_SIZE - pContext->RxLayout.ReserveForHeader,
                 PAGE_SIZE,
                 pContext->RxLayout.ReserveForHeader);
-        DPrintf(0, "[MERGEABLE] Layout mode: %s (bAnyLayout=%d)",
+        DPrintf(0, "Layout mode: %s (bAnyLayout=%d)",
                 combineHeaderAndData ? "Combined header+data" : "Separate header and data",
                 pContext->bAnyLayout);
         
