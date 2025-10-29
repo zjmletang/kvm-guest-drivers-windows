@@ -68,10 +68,6 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
 
     // Maximum number of buffers that can be merged (VirtIO spec limit)
     #define VIRTIO_NET_MAX_MRG_BUFS 256
-    // Timeout for incomplete merge sequences (in 100ns units - 10ms)
-    #define MERGE_BUFFER_TIMEOUT_TICKS (10 * 10000)
-    // Fast path optimization - skip timeout check for first few buffers
-    #define MERGE_BUFFER_FAST_COLLECT_COUNT 4
 
     // Merge buffer support structures
     struct _MergeBufferContext
@@ -80,17 +76,15 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
         UINT32 BufferActualLengths[VIRTIO_NET_MAX_MRG_BUFS];  // Actual received length for each buffer
         UINT16 ExpectedBuffers;
         UINT16 CollectedBuffers;
-        LARGE_INTEGER FirstBufferTimestamp;
         UINT32 TotalPacketLength;
         BOOLEAN IsActive;
     } m_MergeContext;
 
     void ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor);
     BOOLEAN ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength, CCHAR nCurrCpuReceiveQueue);
-    BOOLEAN CollectMergeBuffers(pRxNetDescriptor pFirstBuffer);
+    BOOLEAN CollectMergeBuffers();
     pRxNetDescriptor AssembleMergedPacket();
     void CleanupMergeContext(BOOLEAN returnBuffers);
-    BOOLEAN IsMergeContextTimedOut();
     void TraceMergeableStatistics();  // Debug function to trace mergeable buffer statistics
 
   private:

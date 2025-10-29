@@ -693,9 +693,8 @@ void CParaNdisRX::TraceMergeableStatistics()
         DPrintf(1, "[MERGEABLE STATS] Total merged packets: %u, Max buffers in packet: %u",
                 m_Context->extraStatistics.framesMergedTotal,
                 m_Context->extraStatistics.framesMergeMaxBuffers);
-        DPrintf(1, "[MERGEABLE STATS] Errors: %u, Timeouts: %u",
-                m_Context->extraStatistics.framesMergeErrors,
-                m_Context->extraStatistics.framesMergeTimeouts);
+        DPrintf(1, "[MERGEABLE STATS] Errors: %u",
+                m_Context->extraStatistics.framesMergeErrors);
         DPrintf(1, "[MERGEABLE STATS] RX buffers: %u free, %u max, %u min",
                 m_NetNofReceiveBuffers,
                 m_NetMaxReceiveBuffers,
@@ -1106,28 +1105,26 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nF
         DPrintf(0, "[MERGEABLE] ERROR: Invalid buffer count in merge request: %d (valid range: 2-%d)", 
                 numBuffers, VIRTIO_NET_MAX_MRG_BUFS);
         m_Context->extraStatistics.framesMergeErrors++;
-        // Ensure graceful failure handling
         return FALSE;
     }
     
-    // Clean up any existing merge context (timeout case)
-    if (m_MergeContext.IsActive && IsMergeContextTimedOut())
+    // Clean up any existing incomplete merge context (error recovery)
+    // Per VirtIO spec, all buffers for a packet are atomically available
+    // If we have an active context, it indicates a previous error
+    if (m_MergeContext.IsActive)
     {
-        DPrintf(0, "[MERGEABLE] WARNING: Merge context timeout detected, performing cleanup (previous sequence incomplete)");
+        DPrintf(0, "[MERGEABLE] ERROR: Stale merge context detected, incomplete packet discarded (had %u/%u buffers)",
+                m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
+        m_Context->extraStatistics.framesMergeErrors++;
         CleanupMergeContext(TRUE);
     }
     
     // Initialize new merge context
-    if (!m_MergeContext.IsActive)
-    {
-        DPrintf(4, "[MERGEABLE] Initializing new merge context for %u buffers", numBuffers);
-        NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
-        m_MergeContext.ExpectedBuffers = numBuffers;
-        m_MergeContext.CollectedBuffers = 0;
-        m_MergeContext.TotalPacketLength = 0;
-        m_MergeContext.IsActive = TRUE;
-        KeQuerySystemTime(&m_MergeContext.FirstBufferTimestamp);
-    }
+    NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
+    m_MergeContext.ExpectedBuffers = numBuffers;
+    m_MergeContext.CollectedBuffers = 0;
+    m_MergeContext.TotalPacketLength = 0;
+    m_MergeContext.IsActive = TRUE;
     
     // Add first buffer to merge context
     m_MergeContext.BufferSequence[m_MergeContext.CollectedBuffers] = pFirstBuffer;
@@ -1142,7 +1139,7 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nF
             m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers, m_MergeContext.TotalPacketLength);
     
     // Try to collect remaining buffers
-    if (CollectMergeBuffers(pFirstBuffer))
+    if (CollectMergeBuffers())
     {
         // All buffers collected, assemble the packet
         DPrintf(3, "[MERGEABLE] All %u buffers collected, assembling packet (total: %u bytes)",
@@ -1164,15 +1161,6 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nF
                     m_MergeContext.CollectedBuffers, 
                     m_MergeContext.TotalPacketLength,
                     m_Context->extraStatistics.framesMergedTotal);
-            
-#if DBG
-            // Debug logging for merge buffer performance monitoring
-            LARGE_INTEGER currentInterruptTime;
-            KeQuerySystemTime(&currentInterruptTime);
-            LONGLONG mergeTimeMicroseconds = (currentInterruptTime.QuadPart - m_MergeContext.FirstBufferTimestamp.QuadPart) / 10;
-            DPrintf(4, "[MERGEABLE] Merge timing: %I64d microseconds for %u buffers", 
-                    mergeTimeMicroseconds, m_MergeContext.CollectedBuffers);
-#endif
             
             // Process the assembled packet through the normal path
             PVOID data = pAssembledBuffer->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
@@ -1259,42 +1247,37 @@ BOOLEAN CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nF
         }
     }
     
-    // Still collecting buffers, this is normal
-    return TRUE;
+    // Failed to collect all buffers - this should never happen per VirtIO spec
+    // All buffers for a merged packet must be atomically available
+    DPrintf(0, "[MERGEABLE] ERROR: Incomplete buffer collection (have %u/%u) - packet corrupted",
+            m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
+    m_Context->extraStatistics.framesMergeErrors++;
+    CleanupMergeContext(TRUE);
+    return FALSE;
 }
 
-BOOLEAN CParaNdisRX::CollectMergeBuffers(pRxNetDescriptor pFirstBuffer)
+BOOLEAN CParaNdisRX::CollectMergeBuffers()
 {
-    UNREFERENCED_PARAMETER(pFirstBuffer);
-    
     unsigned int nFullLength;
     pRxNetDescriptor pBufferDescriptor;
     
-    DPrintf(5, "[MERGEABLE] CollectMergeBuffers: Collecting remaining %u buffers (have %u, need %u)",
+    DPrintf(5, "[MERGEABLE] Collecting remaining %u buffers (have %u, need %u)",
             m_MergeContext.ExpectedBuffers - m_MergeContext.CollectedBuffers,
             m_MergeContext.CollectedBuffers,
             m_MergeContext.ExpectedBuffers);
     
-    // Try to collect remaining buffers from the queue
+    // Per VirtIO spec: all buffers for a merged packet are atomically available
+    // Collect remaining buffers - they must all be present in the queue
     while (m_MergeContext.CollectedBuffers < m_MergeContext.ExpectedBuffers)
     {
-        // Fast path: skip timeout check for first few buffers to improve performance
-        if (m_MergeContext.CollectedBuffers > MERGE_BUFFER_FAST_COLLECT_COUNT && 
-            IsMergeContextTimedOut())
-        {
-            DPrintf(0, "[MERGEABLE] ERROR: Merge buffer collection timed out after %u collected (expected %u)",
-                    m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
-            m_Context->extraStatistics.framesMergeTimeouts++;
-            return FALSE;
-        }
-        
-        // Try to get next buffer
+        // Get next buffer - it MUST be available per VirtIO spec
         pBufferDescriptor = (pRxNetDescriptor)m_VirtQueue.GetBuf(&nFullLength);
         if (!pBufferDescriptor)
         {
-            // No more buffers available yet - this is normal for incomplete sequences
-            DPrintf(5, "[MERGEABLE] No more buffers available, waiting (have %u/%u)",
-                    m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
+            // Buffer unavailable = protocol violation or device error
+            DPrintf(0, "[MERGEABLE] ERROR: Buffer %u/%u unavailable - VirtIO protocol violation",
+                    m_MergeContext.CollectedBuffers + 1, m_MergeContext.ExpectedBuffers);
+            m_Context->extraStatistics.framesMergeErrors++;
             return FALSE;
         }
         
@@ -1523,7 +1506,7 @@ void CParaNdisRX::CleanupMergeContext(BOOLEAN returnBuffers)
     {
         if (returnBuffers)
         {
-            // Return any collected buffers to the free pool (error/timeout path)
+            // Return any collected buffers to the free pool (error path)
             for (UINT i = 0; i < m_MergeContext.CollectedBuffers; i++)
             {
                 if (m_MergeContext.BufferSequence[i])
@@ -1536,20 +1519,4 @@ void CParaNdisRX::CleanupMergeContext(BOOLEAN returnBuffers)
         NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
         m_MergeContext.IsActive = FALSE;
     }
-}
-
-BOOLEAN CParaNdisRX::IsMergeContextTimedOut()
-{
-    if (!m_MergeContext.IsActive)
-    {
-        return FALSE;
-    }
-    
-    LARGE_INTEGER currentTime;
-    KeQuerySystemTime(&currentTime);
-    
-    LARGE_INTEGER elapsedTime;
-    elapsedTime.QuadPart = currentTime.QuadPart - m_MergeContext.FirstBufferTimestamp.QuadPart;
-    
-    return (elapsedTime.QuadPart > MERGE_BUFFER_TIMEOUT_TICKS);
 }

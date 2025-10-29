@@ -578,7 +578,6 @@ struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
         ULONG ctrlTimedOut;
         // Merge receive buffer statistics
         ULONG framesMergedTotal;
-        ULONG framesMergeTimeouts;
         ULONG framesMergeErrors;
         ULONG framesMergeMaxBuffers;
     } extraStatistics = {};
