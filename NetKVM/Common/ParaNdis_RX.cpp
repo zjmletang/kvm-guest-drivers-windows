@@ -234,12 +234,6 @@ int CParaNdisRX::PrepareReceiveBuffers()
     
     DPrintf(1, "[RX] Successfully allocated %u/%u RX buffers (mergeable=%d)", 
             m_NetNofReceiveBuffers, m_NetMaxReceiveBuffers, m_Context->bUseMergedBuffers);
-    
-    // Show initial mergeable buffer statistics
-    if (m_Context->bUseMergedBuffers)
-    {
-        TraceMergeableStatistics();
-    }
 
     if (m_Context->extraStatistics.minFreeRxBuffers == 0 ||
         m_Context->extraStatistics.minFreeRxBuffers > m_NetNofReceiveBuffers)
@@ -701,22 +695,6 @@ VOID CParaNdisRX::KickRXRing()
     m_VirtQueue.Kick();
 }
 
-// Add a statistics tracing function for debugging
-void CParaNdisRX::TraceMergeableStatistics()
-{
-    if (m_Context->bUseMergedBuffers)
-    {
-        DPrintf(1, "Mergeable Stats: Total=%u, MaxBuffers=%u, Errors=%u",
-                m_Context->extraStatistics.framesMergedTotal,
-                m_Context->extraStatistics.framesMergeMaxBuffers,
-                m_Context->extraStatistics.framesMergeErrors);
-        DPrintf(1, "RX Buffers: Free=%u, Max=%u, Min=%u",
-                m_NetNofReceiveBuffers,
-                m_NetMaxReceiveBuffers,
-                m_Context->extraStatistics.minFreeRxBuffers);
-    }
-}
-
 #if PARANDIS_SUPPORT_RSS
 static FORCEINLINE VOID ParaNdis_QueueRSSDpc(PARANDIS_ADAPTER *pContext,
                                              ULONG MessageIndex,
@@ -1120,7 +1098,6 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
     {
         DPrintf(0, "ERROR: Invalid buffer count: %d (valid range: 1-%d)", 
                 numBuffers, VIRTIO_NET_MAX_MRG_BUFS);
-        m_Context->extraStatistics.framesMergeErrors++;
         ReuseReceiveBufferNoLock(pFirstBuffer);
         return NULL;
     }
@@ -1155,12 +1132,11 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
             m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers, m_MergeContext.TotalPacketLength);
     
     // Collect remaining buffers
-    if (!CollectMergeBuffers())
+    if (!CollectRemainingMergeBuffers())
     {
         // Failed to collect all buffers - protocol violation
         DPrintf(0, "ERROR: Incomplete buffer collection (have %u/%u) - packet corrupted",
                 m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers);
-        m_Context->extraStatistics.framesMergeErrors++;
         ReturnCollectedBuffers();
         return NULL;
     }
@@ -1178,26 +1154,24 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
         return NULL;
     }
     
-    // Update statistics
-    m_Context->extraStatistics.framesMergedTotal++;
-    if (m_MergeContext.CollectedBuffers > m_Context->extraStatistics.framesMergeMaxBuffers)
-    {
-        m_Context->extraStatistics.framesMergeMaxBuffers = m_MergeContext.CollectedBuffers;
-        DPrintf(2, "New maximum buffer count record: %u buffers", 
-                m_Context->extraStatistics.framesMergeMaxBuffers);
-    }
-    
-    DPrintf(3, "Successfully assembled packet: %u buffers -> %u bytes (total merged packets: %u)",
+    DPrintf(3, "Successfully assembled packet: %u buffers -> %u bytes",
             m_MergeContext.CollectedBuffers, 
-            m_MergeContext.TotalPacketLength,
-            m_Context->extraStatistics.framesMergedTotal);
+            m_MergeContext.TotalPacketLength);
     
     // Note: Merge context cleanup not needed - buffers transferred to pAssembledBuffer
     // and context will be reinitialized on next merge operation
     return pAssembledBuffer;
 }
 
-BOOLEAN CParaNdisRX::CollectMergeBuffers()
+// Collect remaining buffers for a mergeable packet
+// PREREQUISITE: The first buffer (BufferSequence[0]) has already been collected and stored
+//               by the initial GetBuf call. This function collects buffers 2..N.
+// 
+// Per VirtIO spec: For mergeable RX buffers, when num_buffers > 1, all buffers for a packet
+// are atomically available in the virtqueue. This function retrieves the remaining (N-1) buffers.
+//
+// Returns: TRUE if all remaining buffers successfully collected, FALSE on error
+BOOLEAN CParaNdisRX::CollectRemainingMergeBuffers()
 {
     unsigned int nFullLength;
     pRxNetDescriptor pBufferDescriptor;
@@ -1207,8 +1181,8 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
             m_MergeContext.CollectedBuffers,
             m_MergeContext.ExpectedBuffers);
     
-    // Per VirtIO spec: all buffers for a merged packet are atomically available
-    // Collect remaining buffers - they must all be present in the queue
+    // Collect the remaining (N-1) buffers that form the rest of this packet
+    // Note: BufferSequence[0] already contains the first buffer from initial GetBuf
     while (m_MergeContext.CollectedBuffers < m_MergeContext.ExpectedBuffers)
     {
         // Get next buffer - it MUST be available per VirtIO spec
@@ -1218,7 +1192,6 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
             // Buffer unavailable = protocol violation or device error
             DPrintf(0, "ERROR: Buffer %u/%u unavailable - VirtIO protocol violation",
                     m_MergeContext.CollectedBuffers + 1, m_MergeContext.ExpectedBuffers);
-            m_Context->extraStatistics.framesMergeErrors++;
             return FALSE;
         }
         
@@ -1247,7 +1220,6 @@ BOOLEAN CParaNdisRX::CollectMergeBuffers()
             // Resource limit enforcement - too many buffers detected
             DPrintf(0, "ERROR: Excessive merge buffers detected: %d (max allowed: %d)", 
                     m_MergeContext.CollectedBuffers, VIRTIO_NET_MAX_MRG_BUFS);
-            m_Context->extraStatistics.framesMergeErrors++;
             // Graceful failure handling with resource cleanup
             ReuseReceiveBufferNoLock(pBufferDescriptor);
             return FALSE;
@@ -1288,7 +1260,6 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     {
         DPrintf(0, "ERROR: Too many merged buffers %u (max inline: %u) - dropping packet",
                 m_MergeContext.CollectedBuffers, MAX_INLINE_MERGED_BUFFERS + 1);
-        m_Context->extraStatistics.framesMergeErrors++;
         
         ReturnCollectedBuffers();
         return NULL;

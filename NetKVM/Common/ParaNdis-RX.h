@@ -88,11 +88,10 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
 
     void ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor);
     pRxNetDescriptor ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength);
-    BOOLEAN CollectMergeBuffers();
+    BOOLEAN CollectRemainingMergeBuffers();
     pRxNetDescriptor AssembleMergedPacket();
     void ReturnCollectedBuffers();
     void ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHAR nCurrCpuReceiveQueue);
-    void TraceMergeableStatistics();  // Debug function to trace mergeable buffer statistics
     
     // Helper function for mergeable buffer state management
     void DisassembleMergedPacket(pRxNetDescriptor pBuffer);
