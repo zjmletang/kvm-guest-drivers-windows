@@ -93,8 +93,11 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
     void ReturnCollectedBuffers();
     void ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHAR nCurrCpuReceiveQueue);
     void TraceMergeableStatistics();  // Debug function to trace mergeable buffer statistics
+    
+    // Helper function for mergeable buffer state management
+    void DisassembleMergedPacket(pRxNetDescriptor pBuffer);
 
-  private:
+private:
     int PrepareReceiveBuffers();
     pRxNetDescriptor CreateRxDescriptorOnInit();
     pRxNetDescriptor CreateMergeableRxDescriptor();  // Simplified descriptor for mergeable buffers

@@ -580,6 +580,60 @@ void CParaNdisRX::FreeRxDescriptorsFromList()
     }
 }
 
+// Disassemble a merged packet back to its original single-buffer state
+// This is the inverse operation of AssembleMergedPacket, reversing all state changes:
+//   - Frees extended MDL chain (created during assembly)
+//   - Restores PhysicalPages pointer (inverse of SwitchToInlinePhysicalPages)
+//   - Restores NumPages and NumOwnedPages to original values
+//   - Clears MergedBufferCount
+void CParaNdisRX::DisassembleMergedPacket(pRxNetDescriptor pBuffer)
+{
+    // Step 1: Free the extended MDL chain created during merge assembly
+    // The original buffer's MDL still exists and will be reused
+    // We only need to free MDLs for pages beyond the original 2 pages
+    PMDL pMDL = pBuffer->Holder;
+    USHORT mdlCount = 0;
+    
+    // Skip the first buffer's original MDL (which covers the original 2 pages)
+    while (pMDL && mdlCount < 1)
+    {
+        pMDL = NDIS_MDL_LINKAGE(pMDL);
+        mdlCount++;
+    }
+    
+    // Free extended MDLs (for merged additional buffers)
+    while (pMDL)
+    {
+        PMDL pNextMDL = NDIS_MDL_LINKAGE(pMDL);
+        NdisFreeMdl(pMDL);
+        pMDL = pNextMDL;
+    }
+    
+    // Terminate the MDL chain after the first MDL
+    pMDL = pBuffer->Holder;
+    if (pMDL)
+    {
+        NDIS_MDL_LINKAGE(pMDL) = NULL;
+    }
+    
+    // Step 2: Restore PhysicalPages to original array
+    if (pBuffer->PhysicalPages != pBuffer->OriginalPhysicalPages)
+    {
+        // Was using inline array, restore to original small array
+        pBuffer->PhysicalPages = pBuffer->OriginalPhysicalPages;
+    }
+    
+    // Step 3: Restore NumPages and NumOwnedPages to original values (2 for mergeable)
+    pBuffer->NumPages = 2;
+    pBuffer->NumOwnedPages = 2;
+    
+    // Step 4: Clear merge state - this buffer is no longer a merged packet
+    pBuffer->MergedBufferCount = 0;
+    
+    DPrintf(5, "Disassembled merged packet: restored to original state (NumPages=%u, NumOwnedPages=%u)",
+            pBuffer->NumPages, pBuffer->NumOwnedPages);
+}
+
 void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
 {
     DEBUG_ENTRY(4);
@@ -603,55 +657,8 @@ void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
             }
         }
         
-        // CRITICAL: Restore the first buffer to its original state
-        // The PhysicalPages array and MDL chain were expanded during AssembleMergedPacket
-        if (m_Context->bUseMergedBuffers)
-        {
-            // Step 1: Free the extended MDL chain created during merge assembly
-            // The original buffer's MDL still exists and will be reused
-            // We only need to free MDLs for pages beyond the original 2 pages
-            PMDL pMDL = pBuffersDescriptor->Holder;
-            USHORT mdlCount = 0;
-            
-            // Skip the first buffer's original MDL (which covers the original 2 pages)
-            while (pMDL && mdlCount < 1)
-            {
-                pMDL = NDIS_MDL_LINKAGE(pMDL);
-                mdlCount++;
-            }
-            
-            // Free extended MDLs (for merged additional buffers)
-            while (pMDL)
-            {
-                PMDL pNextMDL = NDIS_MDL_LINKAGE(pMDL);
-                NdisFreeMdl(pMDL);
-                pMDL = pNextMDL;
-            }
-            
-            // Terminate the MDL chain after the first MDL
-            pMDL = pBuffersDescriptor->Holder;
-            if (pMDL)
-            {
-                NDIS_MDL_LINKAGE(pMDL) = NULL;
-            }
-            
-            // Step 2: Restore PhysicalPages to original array
-            if (pBuffersDescriptor->PhysicalPages != pBuffersDescriptor->OriginalPhysicalPages)
-            {
-                // Was using inline array, restore to original small array
-                pBuffersDescriptor->PhysicalPages = pBuffersDescriptor->OriginalPhysicalPages;
-            }
-            
-            // Step 3: Restore NumPages and NumOwnedPages to original values (2 for mergeable)
-            pBuffersDescriptor->NumPages = 2;
-            pBuffersDescriptor->NumOwnedPages = 2;
-            
-            DPrintf(5, "Restored first buffer: NumPages=%u, NumOwnedPages=%u, PhysicalPages restored",
-                    pBuffersDescriptor->NumPages, pBuffersDescriptor->NumOwnedPages);
-        }
-        
-        // No need to free anything - inline array is part of the descriptor
-        pBuffersDescriptor->MergedBufferCount = 0;
+        // Disassemble the first buffer back to its original single-buffer state
+        DisassembleMergedPacket(pBuffersDescriptor);
     }
 
     if (!m_Reinsert)
@@ -1295,72 +1302,44 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     // MergedBufferCount = number of ADDITIONAL buffers (not including this one)
     pAssembledBuffer->MergedBufferCount = (USHORT)additionalBuffers;
     
-    // Multi-buffer case: rebuild PhysicalPages array and chain existing MDLs
-    // PhysicalPages MUST be updated because:
-    // 1. Checksum offload calculations traverse PhysicalPages array
-    // 2. Buffer cleanup (ParaNdis_FreeRxBufferDescriptor) uses NumPages to free memory
-    // 3. PhysicalPages must match MDL chain for correctness
-    USHORT totalPages = 0;
+    // Calculate total pages: first buffer contributes 2 pages, each additional buffer contributes 1 page
+    // (subsequent buffers skip their header page at index 0, only use data page at index 1)
+    // Formula: totalPages = 2 + (CollectedBuffers - 1) = 1 + CollectedBuffers
+    USHORT totalPages = 1 + m_MergeContext.CollectedBuffers;
     
-    // Count total pages across all buffers
-    for (UINT i = 0; i < m_MergeContext.CollectedBuffers; i++)
+    // Switch to pre-allocated inline array to hold all pages from merged buffers
+    // Note: For multi-buffer packets, totalPages is always > 2 (first buffer's NumPages)
+    // so this switch always happens in the merge path
+    
+    // Validate totalPages is within bounds (should never exceed due to VirtIO spec)
+    if (totalPages > MAX_MERGED_PHYSICAL_PAGES)
     {
-        pRxNetDescriptor pBuffer = m_MergeContext.BufferSequence[i];
-        if (i == 0)
-        {
-            // First buffer: include all pages
-            totalPages += pBuffer->NumPages;
-        }
-        else
-        {
-            // Subsequent buffers: skip header page, only count data pages
-            totalPages += (pBuffer->NumPages > PARANDIS_FIRST_RX_DATA_PAGE) ? 
-                          (pBuffer->NumPages - PARANDIS_FIRST_RX_DATA_PAGE) : 0;
-        }
+        DPrintf(0, "CRITICAL: totalPages=%u exceeds MAX_MERGED_PHYSICAL_PAGES=%u - this should never happen!",
+                totalPages, MAX_MERGED_PHYSICAL_PAGES);
+        return NULL;
     }
     
-    // Reallocate PhysicalPages array if needed to hold all pages
-    // Use pre-allocated inline array to eliminate allocation in hot path
-    if (totalPages > pAssembledBuffer->NumPages)
-    {
-        // Switch to using pre-allocated inline array (no allocation needed!)
-        // Note: totalPages <= 18 is guaranteed by VirtIO spec and buffer size constraints
-        if (totalPages > MAX_MERGED_PHYSICAL_PAGES)
-        {
-            DPrintf(0, "CRITICAL: totalPages=%u exceeds MAX_MERGED_PHYSICAL_PAGES=%u - this should never happen!",
-                    totalPages, MAX_MERGED_PHYSICAL_PAGES);
-            return NULL;
-        }
-        
-        // Copy existing pages from first buffer to inline array
-        NdisMoveMemory(m_MergeContext.InlinePhysicalPages, 
-                      pAssembledBuffer->PhysicalPages, 
-                      sizeof(tCompletePhysicalAddress) * pAssembledBuffer->NumPages);
-        
-        // No need to free - OriginalPhysicalPages will be restored on reuse
-        // Switch to inline array
-        pAssembledBuffer->PhysicalPages = m_MergeContext.InlinePhysicalPages;
-    }
+    // Copy first buffer's 2 pages to inline array
+    m_MergeContext.InlinePhysicalPages[0] = pAssembledBuffer->PhysicalPages[0];
+    m_MergeContext.InlinePhysicalPages[1] = pAssembledBuffer->PhysicalPages[1];
     
-    // Rebuild PhysicalPages array
-    USHORT destPageIdx = pAssembledBuffer->NumPages;
+    // Switch to inline array (will be restored on reuse)
+    pAssembledBuffer->PhysicalPages = m_MergeContext.InlinePhysicalPages;
+    
+    DPrintf(5, "Switched to inline PhysicalPages array: totalPages=%u", totalPages);
+    
+    // Start filling additional pages after the first buffer's 2 pages
+    USHORT destPageIdx = 2;
     for (UINT i = 1; i < m_MergeContext.CollectedBuffers; i++)
     {
         pRxNetDescriptor pBuffer = m_MergeContext.BufferSequence[i];
-        UINT32 actualBufferLength = m_MergeContext.BufferActualLengths[i];
         
-        // Copy data pages (skip header page at index 0)
-        // Use actual received length for all pages from subsequent buffers
-        for (USHORT srcPageIdx = PARANDIS_FIRST_RX_DATA_PAGE; 
-             srcPageIdx < pBuffer->NumPages && destPageIdx < totalPages; 
-             srcPageIdx++, destPageIdx++)
-        {
-            pAssembledBuffer->PhysicalPages[destPageIdx].Virtual = pBuffer->PhysicalPages[srcPageIdx].Virtual;
-            pAssembledBuffer->PhysicalPages[destPageIdx].Physical = pBuffer->PhysicalPages[srcPageIdx].Physical;
-            // For mergeable buffers, subsequent buffers contain only payload data
-            // Use the actual received length directly
-            pAssembledBuffer->PhysicalPages[destPageIdx].size = actualBufferLength;
-        }
+        // Copy data page from subsequent buffer (each buffer has 2 pages, we only use page[1])
+        // Page[0] is reserved for header but unused in subsequent buffers
+        pAssembledBuffer->PhysicalPages[destPageIdx].Virtual = pBuffer->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
+        pAssembledBuffer->PhysicalPages[destPageIdx].Physical = pBuffer->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Physical;
+        pAssembledBuffer->PhysicalPages[destPageIdx].size = m_MergeContext.BufferActualLengths[i];
+        destPageIdx++;
     }
     
     // Update page count
@@ -1384,19 +1363,12 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     // (subsequent buffers in mergeable RX have NO virtio header, just pure data)
     for (UINT i = 1; i < m_MergeContext.CollectedBuffers; i++)
     {
-        pRxNetDescriptor pAdditionalBuffer = m_MergeContext.BufferSequence[i];
-        if (!pAdditionalBuffer)
-        {
-            continue;
-        }
-        
         // For subsequent buffers: create MDL for FULL buffer (no header to skip)
         // The entire buffer is payload data, starting from PhysicalPages[0]
         // Use actual received length instead of allocated buffer size
-        UINT32 actualBufferLength = m_MergeContext.BufferActualLengths[i];
         PMDL pNewMDL = NdisAllocateMdl(m_Context->MiniportHandle,
-                                       pAdditionalBuffer->PhysicalPages[0].Virtual,
-                                       actualBufferLength);
+                                       m_MergeContext.BufferSequence[i]->PhysicalPages[0].Virtual,
+                                       m_MergeContext.BufferActualLengths[i]);
         if (!pNewMDL)
         {
             DPrintf(0, "ERROR: Failed to allocate MDL for buffer %u", i);
@@ -1418,7 +1390,7 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
         NDIS_MDL_LINKAGE(pNewMDL) = NULL;
         pPreviousMDL = pNewMDL;
         
-        // Note: pAdditionalBuffer->Holder will be freed when ReuseReceiveBufferNoLock is called
+        // Note: BufferSequence[i]->Holder will be freed when ReuseReceiveBufferNoLock is called
         // The new MDL we created will be freed when pAssembledBuffer's packet is returned
     }
     
