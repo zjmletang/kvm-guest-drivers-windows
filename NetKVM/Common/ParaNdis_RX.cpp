@@ -1273,14 +1273,7 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
                 m_MergeContext.CollectedBuffers, MAX_INLINE_MERGED_BUFFERS + 1);
         m_Context->extraStatistics.framesMergeErrors++;
         
-        // Return all collected buffers to the free pool
-        for (UINT i = 0; i < m_MergeContext.CollectedBuffers; i++)
-        {
-            if (m_MergeContext.BufferSequence[i])
-            {
-                ReuseReceiveBufferNoLock(m_MergeContext.BufferSequence[i]);
-            }
-        }
+        ReturnCollectedBuffers();
         return NULL;
     }
     

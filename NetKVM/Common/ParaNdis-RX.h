@@ -66,8 +66,9 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
 
     PARANDIS_RECEIVE_QUEUE m_UnclassifiedPacketsQueue;
 
-    // Maximum number of buffers that can be merged (VirtIO spec limit)
-    #define VIRTIO_NET_MAX_MRG_BUFS 256
+    // Maximum mergeable packet size per VirtIO spec: 65562 bytes (including virtio header)
+    // This requires 17 PAGE-sized buffers to accommodate
+    #define VIRTIO_NET_MAX_MRG_BUFS 17
 
     // Merge buffer support structures
     struct _MergeBufferContext

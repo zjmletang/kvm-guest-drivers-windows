@@ -463,11 +463,16 @@ struct _tagRxNetDescriptor
     // Mergeable buffer support - inline storage for merged buffers (no allocation needed)
     // Semantics:
     //   MergedBufferCount: Number of ADDITIONAL buffers merged (NOT including this descriptor)
-    //                      0 = not merged, >0 = merged packet
-    //   MergedBuffersInline: Stores additional buffers (NOT including this descriptor)
-    //                        Array size = MergedBufferCount (direct correspondence)
-    // Example: 3 buffers total => MergedBufferCount=2, MergedBuffersInline[0..1] has the other 2
-#define MAX_INLINE_MERGED_BUFFERS 16
+    // Inline buffer array for mergeable packets
+    // Maximum packet size calculation:
+    //   - VirtIO max packet: 65535 bytes + 12 byte header = 65547 bytes
+    //   - First buffer: 4096 - 12 = 4084 bytes (with header)
+    //   - Remaining: 65547 - 4084 = 61463 bytes
+    //   - Additional buffers needed: ceil(61463 / 4096) = 15
+    //   - Total: 1 + 15 = 16 buffers
+    //   - Add 1 for safety margin = 17 buffers
+    // Note: Total includes the primary descriptor, so inline array stores 16 additional buffers
+#define MAX_INLINE_MERGED_BUFFERS 16  // Supports up to 17-buffer packets (1 primary + 16 additional)
     USHORT MergedBufferCount;  // Number of additional buffers (this one excluded)
     pRxNetDescriptor MergedBuffersInline[MAX_INLINE_MERGED_BUFFERS];  // Additional buffers (this one excluded)
 };
