@@ -66,13 +66,15 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
 
     PARANDIS_RECEIVE_QUEUE m_UnclassifiedPacketsQueue;
 
-    // Maximum mergeable packet size per VirtIO spec: 65562 bytes (including virtio header)
-    // This requires 17 PAGE-sized buffers to accommodate
+    // VirtIO mergeable receive buffer limits (VIRTIO_NET_F_MRG_RXBUF)
+    // Maximum mergeable packet size per VirtIO spec: 65562 bytes (including 12-byte header)
+    // Required buffers: ceil(65562 / 4096) = 17 PAGE-sized buffers maximum
+    // This is significantly lower than the protocol maximum (256) but covers all realistic packets
     #define VIRTIO_NET_MAX_MRG_BUFS 17
 
-    // Merge buffer support structures
-    // Pre-allocated PhysicalPages array to eliminate allocation in hot path
-    // Maximum: First buffer (2 pages) + additional buffers (16 * 1 page) = 18 pages
+    // Merge buffer context structure - pre-allocated to avoid hot-path allocation
+    // Maximum PhysicalPages needed: First buffer (2 pages) + additional buffers (16 * 1 page) = 18 pages
+    // Note: First buffer has 2 logical pages (PhysicalPages[0] and [1] alias to same physical page)
     #define MAX_MERGED_PHYSICAL_PAGES 18
     struct _MergeBufferContext
     {
@@ -90,7 +92,7 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
     pRxNetDescriptor ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength);
     BOOLEAN CollectRemainingMergeBuffers();
     pRxNetDescriptor AssembleMergedPacket();
-    void ReturnCollectedBuffers();
+    void ReuseCollectedBuffers();
     void ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHAR nCurrCpuReceiveQueue);
     
     // Helper function for mergeable buffer state management

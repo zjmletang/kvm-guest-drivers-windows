@@ -461,18 +461,19 @@ struct _tagRxNetDescriptor
 
     CParaNdisRX *Queue;
     
-    // Mergeable buffer support - inline storage for merged buffers (no allocation needed)
-    // Semantics:
-    //   MergedBufferCount: Number of ADDITIONAL buffers merged (NOT including this descriptor)
-    // Inline buffer array for mergeable packets
-    // Maximum packet size calculation:
-    //   - VirtIO max packet: 65535 bytes + 12 byte header = 65547 bytes
-    //   - First buffer: 4096 - 12 = 4084 bytes (with header)
-    //   - Remaining: 65547 - 4084 = 61463 bytes
-    //   - Additional buffers needed: ceil(61463 / 4096) = 15
-    //   - Total: 1 + 15 = 16 buffers
-    //   - Add 1 for safety margin = 17 buffers
-    // Note: Total includes the primary descriptor, so inline array stores 16 additional buffers
+    // Mergeable buffer support - inline storage for merged buffers (eliminates dynamic allocation)
+    // Design rationale:
+    //   - Pre-allocated inline arrays avoid heap allocation in the hot RX path
+    //   - Maximum packet size: 65535 bytes + 12-byte virtio header = 65547 bytes
+    //   - First buffer: ~4084 bytes (4096 - 12 header), Remaining: ~61463 bytes
+    //   - Additional buffers needed: ceil(61463 / 4096) = 15 buffers
+    //   - Total: 1 (primary) + 15 (additional) = 16 buffers, plus 1 safety margin = 17
+    // 
+    // Field semantics:
+    //   MergedBufferCount: Number of ADDITIONAL buffers (NOT including this descriptor)
+    //                      Range: 0 (single buffer) to 16 (max merged packet)
+    //   MergedBuffersInline: Array storing pointers to the 16 additional buffers
+    //                        (this descriptor itself is not stored in the array)
 #define MAX_INLINE_MERGED_BUFFERS 16  // Supports up to 17-buffer packets (1 primary + 16 additional)
     USHORT MergedBufferCount;  // Number of additional buffers (this one excluded)
     pRxNetDescriptor MergedBuffersInline[MAX_INLINE_MERGED_BUFFERS];  // Additional buffers (this one excluded)
@@ -582,10 +583,7 @@ struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
         ULONG ctrlCommands;
         ULONG ctrlFailed;
         ULONG ctrlTimedOut;
-        // Merge receive buffer statistics
-        ULONG framesMergedTotal;
-        ULONG framesMergeErrors;
-        ULONG framesMergeMaxBuffers;
+
     } extraStatistics = {};
 
     /* initial number of free Tx descriptor(from cfg) - max number of available Tx descriptors */
