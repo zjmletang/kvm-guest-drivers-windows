@@ -1175,93 +1175,42 @@ static void PrepareRXLayout(PARANDIS_ADAPTER *pContext)
     ULONG rxPayloadSize;
     bool combineHeaderAndData = pContext->bAnyLayout;
     
-    // Optimize for mergeable buffers: Use smaller buffer size to encourage merging
-    if (pContext->bUseMergedBuffers)
+    // Note: For mergeable buffers (bUseMergedBuffers=true), this layout is NOT used.
+    // CreateMergeableRxDescriptor uses hardcoded simple layout (1 page per buffer).
+    // This function only configures layout for traditional non-mergeable buffers.
+    
+    if (combineHeaderAndData)
     {
-        DPrintf(0, "Configuring optimized layout for mergeable buffers (VIRTIO_NET_F_MRG_RXBUF)");
-        // For mergeable buffers, use simplified layout: virtio header + data only
-        // No indirect area needed since each buffer is small and self-contained
-        
-        // Simplified buffer layout for mergeable buffers:
-        // - 1 page (4KB) total size
-        // - virtio header at the beginning
-        // - remaining space for packet data
-        // - No indirect area needed
-        
-        if (combineHeaderAndData)
-        {
-            pContext->RxLayout.ReserveForHeader = 0;
-            // All space available for data including embedded header
-            rxPayloadSize = PAGE_SIZE;
-        }
-        else
-        {
-            pContext->RxLayout.ReserveForHeader = ALIGN_UP_BY(pContext->nVirtioHeaderSize, alignment);
-            // Remaining space after header for data
-            rxPayloadSize = PAGE_SIZE - pContext->RxLayout.ReserveForHeader;
-        }
-        
-        // Simplified layout for mergeable buffers - clean and minimal
-        pContext->RxLayout.TotalAllocationsPerBuffer = 1;  // Single page
-        pContext->RxLayout.IndirectEntries = 0;            // No indirect descriptors
-        pContext->RxLayout.ReserveForIndirectArea = 0;     // No indirect area
-        pContext->RxLayout.HeaderPageAllocation = pContext->RxLayout.ReserveForHeader;  // Just header space
-        pContext->RxLayout.ReserveForPacketTail = 0;       // No tail concept
-        
-        DPrintf(0, "Layout configured: TotalAllocations=%u, HeaderAllocation=%u, ReserveForHeader=%u, VirtioHeaderSize=%u",
-                pContext->RxLayout.TotalAllocationsPerBuffer,
-                pContext->RxLayout.HeaderPageAllocation,
-                pContext->RxLayout.ReserveForHeader,
-                pContext->nVirtioHeaderSize);
-        DPrintf(0, "Buffer data space per buffer: %u bytes (PageSize=%u - HeaderReserve=%u)",
-                PAGE_SIZE - pContext->RxLayout.ReserveForHeader,
-                PAGE_SIZE,
-                pContext->RxLayout.ReserveForHeader);
-        DPrintf(0, "Layout mode: %s (bAnyLayout=%d)",
-                combineHeaderAndData ? "Combined header+data" : "Separate header and data",
-                pContext->bAnyLayout);
-        
-        DPrintf(0, "Mergeable buffers: simplified layout - %u bytes header + %u bytes data in %u byte page", 
-                (UINT)pContext->RxLayout.ReserveForHeader,
-                PAGE_SIZE - (UINT)pContext->RxLayout.ReserveForHeader,
-                PAGE_SIZE);
+        pContext->RxLayout.ReserveForHeader = 0;
+        rxPayloadSize = pContext->MaxPacketSize.nMaxDataSizeHwRx + pContext->nVirtioHeaderSize;
     }
     else
     {
-        // Original logic for non-mergeable buffers: allocate large enough buffers
-        if (combineHeaderAndData)
-        {
-            pContext->RxLayout.ReserveForHeader = 0;
-            rxPayloadSize = pContext->MaxPacketSize.nMaxDataSizeHwRx + pContext->nVirtioHeaderSize;
-        }
-        else
-        {
-            pContext->RxLayout.ReserveForHeader = ALIGN_UP_BY(pContext->nVirtioHeaderSize, alignment);
-            rxPayloadSize = pContext->MaxPacketSize.nMaxDataSizeHwRx;
-        }
-        // include the header
-        pContext->RxLayout.TotalAllocationsPerBuffer = USHORT(rxPayloadSize / PAGE_SIZE) + 1;
-        USHORT tail = rxPayloadSize % PAGE_SIZE;
-        // we need one entry for each data page + header + tail (if any)
-        pContext->RxLayout.IndirectEntries = pContext->RxLayout.TotalAllocationsPerBuffer + !!tail;
-        pContext->RxLayout.ReserveForIndirectArea = ALIGN_UP_BY(pContext->RxLayout.IndirectEntries * sizeof(VirtIOBufferDescriptor),
-                                                                alignment);
-        pContext->RxLayout.HeaderPageAllocation = pContext->RxLayout.ReserveForHeader +
-                                                  pContext->RxLayout.ReserveForIndirectArea;
-        if (pContext->RxLayout.HeaderPageAllocation + tail > PAGE_SIZE)
-        {
-            // packet tail is quite big, placing it in additional page
-            pContext->RxLayout.TotalAllocationsPerBuffer++;
-        }
-        else
-        {
-            pContext->RxLayout.HeaderPageAllocation += tail;
-            pContext->RxLayout.ReserveForPacketTail = tail;
-        }
-        while (!IsPowerOfTwo(pContext->RxLayout.HeaderPageAllocation))
-        {
-            pContext->RxLayout.HeaderPageAllocation++;
-        }
+        pContext->RxLayout.ReserveForHeader = ALIGN_UP_BY(pContext->nVirtioHeaderSize, alignment);
+        rxPayloadSize = pContext->MaxPacketSize.nMaxDataSizeHwRx;
+    }
+    // include the header
+    pContext->RxLayout.TotalAllocationsPerBuffer = USHORT(rxPayloadSize / PAGE_SIZE) + 1;
+    USHORT tail = rxPayloadSize % PAGE_SIZE;
+    // we need one entry for each data page + header + tail (if any)
+    pContext->RxLayout.IndirectEntries = pContext->RxLayout.TotalAllocationsPerBuffer + !!tail;
+    pContext->RxLayout.ReserveForIndirectArea = ALIGN_UP_BY(pContext->RxLayout.IndirectEntries * sizeof(VirtIOBufferDescriptor),
+                                                            alignment);
+    pContext->RxLayout.HeaderPageAllocation = pContext->RxLayout.ReserveForHeader +
+                                              pContext->RxLayout.ReserveForIndirectArea;
+    if (pContext->RxLayout.HeaderPageAllocation + tail > PAGE_SIZE)
+    {
+        // packet tail is quite big, placing it in additional page
+        pContext->RxLayout.TotalAllocationsPerBuffer++;
+    }
+    else
+    {
+        pContext->RxLayout.HeaderPageAllocation += tail;
+        pContext->RxLayout.ReserveForPacketTail = tail;
+    }
+    while (!IsPowerOfTwo(pContext->RxLayout.HeaderPageAllocation))
+    {
+        pContext->RxLayout.HeaderPageAllocation++;
     }
 #else
     USHORT alignment = 8;
