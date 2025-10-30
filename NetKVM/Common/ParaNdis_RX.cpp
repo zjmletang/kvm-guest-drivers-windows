@@ -245,10 +245,12 @@ int CParaNdisRX::PrepareReceiveBuffers()
     return nRet;
 }
 
-// Simplified buffer creation for mergeable buffers - just 1 page with header + data
+// Simplified buffer creation for mergeable buffers - just 1 page per buffer
+// Requirements: VirtIO 1.0+ with ANY_LAYOUT (combined header+data in single descriptor)
+// Legacy VirtIO 0.95 devices should use traditional non-mergeable path for compatibility
 pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
 {
-    DPrintf(4, "[MERGEABLE] Creating mergeable RX descriptor (1 page buffer)");
+    DPrintf(4, "[MERGEABLE] Creating mergeable RX descriptor (1 page, combined layout)");
     
     pRxNetDescriptor p = (pRxNetDescriptor)ParaNdis_AllocateMemory(m_Context, sizeof(*p));
     if (p == NULL)
@@ -259,13 +261,12 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
 
     NdisZeroMemory(p, sizeof(*p));
 
-    // For mergeable buffers: 1 or 2 buffer descriptors depending on combineHeaderAndData
-    ULONG sgArraySize = m_Context->bAnyLayout ? 1 : 2;
+    // Single SG entry for combined header+data (ANY_LAYOUT mode)
     p->BufferSGArray = (struct VirtIOBufferDescriptor *)ParaNdis_AllocateMemory(m_Context, 
-                                                                               sizeof(VirtIOBufferDescriptor) * sgArraySize);
+                                                                               sizeof(VirtIOBufferDescriptor));
     if (p->BufferSGArray == NULL)
     {
-        DPrintf(0, "ERROR: Failed to allocate SG array (size=%u)", sgArraySize);
+        DPrintf(0, "ERROR: Failed to allocate SG array");
         goto error_exit;
     }
 
@@ -295,51 +296,21 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
     DPrintf(4, "Allocated 1 page: Virtual=%p, Physical=0x%llx", 
             p->PhysicalPages[0].Virtual, p->PhysicalPages[0].Physical.QuadPart);
 
-    // Setup for mergeable buffer - arrange to match ParaNdis_BindRxBufferToPacket expectations
+    // Setup for mergeable buffer with ANY_LAYOUT (VirtIO 1.0+)
     p->NumPages = 2;  // Always 2: PhysicalPages[0]=header, PhysicalPages[1]=data
     p->HeaderPage = 0;  // Header at PhysicalPages[0]
-    p->DataStartOffset = 0;  // For subsequent buffers: full buffer is data (no header skip)
+    p->DataStartOffset = (USHORT)m_Context->nVirtioHeaderSize;  // Offset past header to data
     p->NumOwnedPages = p->NumPages;
     
-    if (m_Context->bAnyLayout)
-    {
-        // Combined header and data in single buffer descriptor
-        p->BufferSGLength = 1;
-         p->DataStartOffset = (USHORT)m_Context->nVirtioHeaderSize;  // Offset past header to find data
-        
-        p->BufferSGArray[0].physAddr = p->PhysicalPages[0].Physical;
-        p->BufferSGArray[0].length = PAGE_SIZE;
-        
-        // Setup PhysicalPages[1] to point to data portion for ParaNdis_BindRxBufferToPacket
-        // For first buffer: this skips the virtio header area
-        // For subsequent buffers: since host writes data from offset 0, we need full buffer
-        p->PhysicalPages[1].Physical.QuadPart = p->PhysicalPages[0].Physical.QuadPart;
-        p->PhysicalPages[1].Virtual = p->PhysicalPages[0].Virtual;
-        p->PhysicalPages[1].size = PAGE_SIZE;
-        
-        DPrintf(4, "Combined layout: SGLength=1, BufferSize=%u (full buffer)",
-                PAGE_SIZE);
-    }
-    else
-    {
-        // Separate header and data buffer descriptors
-        p->BufferSGLength = 2;
-        
-        // First SG entry: VirtIO header
-        p->BufferSGArray[0].physAddr = p->PhysicalPages[0].Physical;
-        p->BufferSGArray[0].length = m_Context->nVirtioHeaderSize;
-        
-        // Second SG entry: Data portion (for first buffer: after header; for subsequent: full buffer)
-        p->PhysicalPages[1].Physical.QuadPart = p->PhysicalPages[0].Physical.QuadPart;
-        p->PhysicalPages[1].Virtual = p->PhysicalPages[0].Virtual;
-        p->PhysicalPages[1].size = PAGE_SIZE;
-        
-        p->BufferSGArray[1].physAddr = p->PhysicalPages[1].Physical;
-        p->BufferSGArray[1].length = p->PhysicalPages[1].size;
-        
-        DPrintf(4, "Separate layout: SGLength=2, HeaderSize=%u, DataSize=%u",
-                m_Context->nVirtioHeaderSize, PAGE_SIZE);
-    }
+    // Combined header and data in single SG entry (ANY_LAYOUT)
+    p->BufferSGLength = 1;
+    p->BufferSGArray[0].physAddr = p->PhysicalPages[0].Physical;
+    p->BufferSGArray[0].length = PAGE_SIZE;
+    
+    // Setup PhysicalPages[1] for data portion (used by ParaNdis_BindRxBufferToPacket)
+    p->PhysicalPages[1].Physical.QuadPart = p->PhysicalPages[0].Physical.QuadPart;
+    p->PhysicalPages[1].Virtual = p->PhysicalPages[0].Virtual;
+    p->PhysicalPages[1].size = PAGE_SIZE;
 
     // No indirect area for mergeable buffers
     p->IndirectArea.Physical.QuadPart = 0;
@@ -365,11 +336,19 @@ error_exit:
 
 pRxNetDescriptor CParaNdisRX::CreateRxDescriptorOnInit()
 {
-    // For mergeable buffers, use simplified allocation - just 1 page per buffer
-    if (m_Context->bUseMergedBuffers)
+    // For mergeable buffers with ANY_LAYOUT, use simplified allocation - just 1 page per buffer
+    // Note: VirtIO 1.0+ devices implicitly support ANY_LAYOUT behavior (per spec section 2.1.2)
+    // Legacy VirtIO 0.95 devices without ANY_LAYOUT are not supported in mergeable mode
+    if (m_Context->bUseMergedBuffers && m_Context->bAnyLayout)
     {
-        DPrintf(4, "Using mergeable buffer allocation (small buffers to encourage merging)");
+        DPrintf(4, "Using mergeable buffer allocation (small buffers, combined layout)");
         return CreateMergeableRxDescriptor();
+    }
+    
+    // Legacy path: either non-mergeable or old VirtIO 0.95 without ANY_LAYOUT
+    if (m_Context->bUseMergedBuffers && !m_Context->bAnyLayout)
+    {
+        DPrintf(0, "WARNING: Mergeable buffers require ANY_LAYOUT support (VirtIO 1.0+), falling back to traditional mode");
     }
     
     DPrintf(4, "Using traditional buffer allocation (large buffers)");;
