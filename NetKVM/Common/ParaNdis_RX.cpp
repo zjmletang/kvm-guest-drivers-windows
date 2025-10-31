@@ -1299,28 +1299,21 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     for (UINT i = 1; i < m_MergeContext.CollectedBuffers; i++)
     {
         // For subsequent buffers: create MDL for FULL buffer (no header to skip)
-        // The entire buffer is payload data, starting from PhysicalPages[0]
+        // Use PARANDIS_FIRST_RX_DATA_PAGE for consistency with ParaNdis_BindRxBufferToPacket
+        // (PhysicalPages[0] and [1] are aliased in mergeable mode, so functionally equivalent)
         // Use actual received length instead of allocated buffer size
         PMDL pNewMDL = NdisAllocateMdl(m_Context->MiniportHandle,
-                                       m_MergeContext.BufferSequence[i]->PhysicalPages[0].Virtual,
+                                       m_MergeContext.BufferSequence[i]->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual,
                                        m_MergeContext.BufferActualLengths[i]);
         if (!pNewMDL)
         {
-            DPrintf(0, "ERROR: Failed to allocate MDL for buffer %u", i);
-            // Continue with what we have - partial packet better than nothing
-            continue;
+            DPrintf(0, "ERROR: Failed to allocate MDL for buffer %u, aborting packet assembly", i);
+            // Return NULL - DisassembleMergedPacket will clean up partial state
+            return NULL;
         }
         
-        // Chain this new MDL to the assembled packet's MDL chain
-        if (pPreviousMDL)
-        {
-            NDIS_MDL_LINKAGE(pPreviousMDL) = pNewMDL;
-        }
-        else
-        {
-            // This should not happen as first buffer should have MDLs
-            pAssembledBuffer->Holder = pNewMDL;
-        }
+        // Chain this new MDL to the end of the assembled packet's MDL chain
+        NDIS_MDL_LINKAGE(pPreviousMDL) = pNewMDL;
         
         NDIS_MDL_LINKAGE(pNewMDL) = NULL;
         pPreviousMDL = pNewMDL;
