@@ -40,12 +40,6 @@ static BOOLEAN ParaNdis_BindRxBufferToPacket(PARANDIS_ADAPTER *pContext, pRxNetD
     ULONG i, offset = p->DataStartOffset;
     PMDL *NextMdlLinkage = &p->Holder;
 
-    // MDL creation starts from PARANDIS_FIRST_RX_DATA_PAGE (index 1) for both modes:
-    // - Traditional mode: PhysicalPages[0] = header block, PhysicalPages[1+] = data pages
-    // - Mergeable mode: PhysicalPages[0] and [1] are aliases pointing to the same physical page
-    //   (full buffer with header at offset 0, data at offset nVirtioHeaderSize)
-    ULONG startPage = PARANDIS_FIRST_RX_DATA_PAGE;
-    
     // for first page adjust the start and size of the MDL.
     // It would be better to span the MDL on entire page and
     // create the NBL with offset. But in 2 NDIS tests (RSS and
@@ -53,7 +47,7 @@ static BOOLEAN ParaNdis_BindRxBufferToPacket(PARANDIS_ADAPTER *pContext, pRxNetD
     // the packet pattern because it is looking for it in wrong
     // place, i.e. the driver fails to process the NB with offset
     // that is not zero. TODO: open the bug report.
-    for (i = startPage; i < p->NumPages; i++)
+    for (i = PARANDIS_FIRST_RX_DATA_PAGE; i < p->NumPages; i++)
     {
         *NextMdlLinkage = NdisAllocateMdl(pContext->MiniportHandle,
                                           RtlOffsetToPointer(p->PhysicalPages[i].Virtual, offset),
@@ -151,25 +145,6 @@ bool CParaNdisRX::Create(PPARANDIS_ADAPTER Context, UINT DeviceQueueIndex)
         m_NetMaxReceiveBuffers = Context->maxRxBufferPerQueue;
     }
 
-    DPrintf(0, "[RX] CParaNdisRX::Create: Queue=%u, MaxBuffers=%u, MergeableBuffers=%s",
-            DeviceQueueIndex, m_NetMaxReceiveBuffers, 
-            Context->bUseMergedBuffers ? "ENABLED" : "DISABLED");
-    
-    if (Context->bUseMergedBuffers)
-    {
-        DPrintf(0, "[MERGEABLE] RX Queue configuration:");
-        DPrintf(0, "[MERGEABLE] - VirtIO header size: %u bytes", Context->nVirtioHeaderSize);
-        DPrintf(0, "[MERGEABLE] - Buffer size: %u bytes (1 page)", PAGE_SIZE);
-        // Note: Data space calculation uses RxLayout.ReserveForHeader, but mergeable mode
-        //       doesn't actually use RxLayout (values are hardcoded in CreateMergeableRxDescriptor)
-        DPrintf(0, "[MERGEABLE] - Approximate data space per buffer: ~%u bytes", 
-                PAGE_SIZE - Context->nVirtioHeaderSize);
-        DPrintf(0, "[MERGEABLE] - Layout mode: %s", 
-                Context->bAnyLayout ? "Combined (header+data in single descriptor)" : "Separate");
-        DPrintf(0, "[MERGEABLE] - Expected merge for packets > %u bytes", 
-                PAGE_SIZE - Context->nVirtioHeaderSize);
-    }
-
     if (!m_VirtQueue.Create(DeviceQueueIndex, &m_Context->IODevice, m_Context->MiniportHandle))
     {
         DPrintf(0, "CParaNdisRX::Create - virtqueue creation failed");
@@ -204,15 +179,11 @@ int CParaNdisRX::PrepareReceiveBuffers()
     UINT i;
     DEBUG_ENTRY(4);
 
-    DPrintf(1, "[RX] PrepareReceiveBuffers: Allocating %u buffers (mergeable=%d)", 
-            m_NetMaxReceiveBuffers, m_Context->bUseMergedBuffers);
-
     for (i = 0; i < m_NetMaxReceiveBuffers; ++i)
     {
         pRxNetDescriptor pBuffersDescriptor = CreateRxDescriptorOnInit();
         if (!pBuffersDescriptor)
         {
-            DPrintf(0, "[RX] ERROR: Failed to create RX descriptor %u/%u", i, m_NetMaxReceiveBuffers);
             break;
         }
 
@@ -220,7 +191,6 @@ int CParaNdisRX::PrepareReceiveBuffers()
 
         if (!AddRxBufferToQueue(pBuffersDescriptor))
         {
-            DPrintf(0, "[RX] ERROR: Failed to add buffer %u to queue", i);
             ParaNdis_FreeRxBufferDescriptor(m_Context, pBuffersDescriptor);
             break;
         }
@@ -234,9 +204,6 @@ int CParaNdisRX::PrepareReceiveBuffers()
     m_NetMaxReceiveBuffers = m_NetNofReceiveBuffers;
 
     RecalculateLimits();
-    
-    DPrintf(1, "[RX] Successfully allocated %u/%u RX buffers (mergeable=%d)", 
-            m_NetNofReceiveBuffers, m_NetMaxReceiveBuffers, m_Context->bUseMergedBuffers);
 
     if (m_Context->extraStatistics.minFreeRxBuffers == 0 ||
         m_Context->extraStatistics.minFreeRxBuffers > m_NetNofReceiveBuffers)
@@ -503,7 +470,6 @@ BOOLEAN CParaNdisRX::AllocateMore()
     {
         return result;
     }
-    
     pRxNetDescriptor pBuffersDescriptor = CreateRxDescriptorOnInit();
 
     TPassiveSpinLocker autoLock(m_Lock);
@@ -519,19 +485,11 @@ BOOLEAN CParaNdisRX::AllocateMore()
             RecalculateLimits();
             KickRXRing();
             result = true;
-            
-            DPrintf(4, "[RX] Successfully allocated additional buffer: total=%u, max=%u",
-                    m_NetNofReceiveBuffers, m_NetMaxReceiveBuffers);
         }
         else
         {
-            DPrintf(0, "[RX] ERROR: Failed to add additional buffer to queue");
             ParaNdis_FreeRxBufferDescriptor(m_Context, pBuffersDescriptor);
         }
-    }
-    else
-    {
-        DPrintf(0, "[RX] ERROR: Failed to allocate additional RX descriptor");
     }
     return result;
 }

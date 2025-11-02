@@ -636,7 +636,6 @@ static void InitializeMaxMTUConfig(PPARANDIS_ADAPTER pContext)
                           ETH_ALEN + 2 * sizeof(USHORT),
                           &pContext->MaxPacketSize.nMaxDataSize,
                           sizeof(USHORT));
-        DPrintf(0, "get mtu size from device %u", pContext->MaxPacketSize.nMaxDataSize);
     }
 }
 
@@ -892,16 +891,8 @@ NDIS_STATUS ParaNdis_InitializeContext(PARANDIS_ADAPTER *pContext, PNDIS_RESOURC
         InitializeMaxMTUConfig(pContext);
 
         pContext->bUseMergedBuffers = AckFeature(pContext, VIRTIO_NET_F_MRG_RXBUF);
-        DPrintf(0, "VirtIO Mergeable Receive Buffers: %s", 
-                pContext->bUseMergedBuffers ? "NEGOTIATED" : "NOT AVAILABLE");
-        if (pContext->bUseMergedBuffers)
-        {
-            DPrintf(0, "Feature enabled - will use small buffers to encourage packet merging");
-        }
         pContext->nVirtioHeaderSize = (pContext->bUseMergedBuffers) ? sizeof(virtio_net_hdr_mrg_rxbuf)
                                                                     : sizeof(virtio_net_hdr);
-        DPrintf(0, "VirtIO header size: %u bytes (mergeable=%d)", 
-                pContext->nVirtioHeaderSize, pContext->bUseMergedBuffers);
         AckFeature(pContext, VIRTIO_RING_F_EVENT_IDX);
     }
     else
