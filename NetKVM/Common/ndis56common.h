@@ -462,11 +462,11 @@ struct _tagRxNetDescriptor
     NET_PACKET_INFO PacketInfo;
 
     CParaNdisRX *Queue;
-    
+
     // Mergeable buffer support - inline storage for merged buffers (eliminates dynamic allocation)
     // Maximum mergeable packet size per VirtIO spec: 65562 bytes (including 12-byte header)
     // Required buffers: ceil(65562 / 4096) = 17 PAGE-sized buffers maximum
-    // 
+    //
     // Field semantics:
     //   MergedBufferCount: Number of ADDITIONAL buffers (NOT including this descriptor)
     //                      Range: 0 (single buffer) to 16 (max merged packet)
