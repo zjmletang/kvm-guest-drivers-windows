@@ -444,6 +444,7 @@ struct _tagRxNetDescriptor
     USHORT BufferSGLength;
     // number of configured pages
     USHORT NumPages;
+    // Pages allocated and owned by this descriptor
     USHORT NumOwnedPages;
     // might be 0 or 1 (if combined)
     USHORT HeaderPage;
@@ -453,7 +454,8 @@ struct _tagRxNetDescriptor
 #define PARANDIS_FIRST_RX_DATA_PAGE (1)
     struct VirtIOBufferDescriptor *BufferSGArray;
     tCompletePhysicalAddress *PhysicalPages;
-    tCompletePhysicalAddress *OriginalPhysicalPages;  // Saved pointer for restoration after merge
+    // Saved pointer for restoration after merge
+    tCompletePhysicalAddress *OriginalPhysicalPages;
     tCompletePhysicalAddress IndirectArea;
     tPacketHolderType Holder;
 
@@ -462,21 +464,17 @@ struct _tagRxNetDescriptor
     CParaNdisRX *Queue;
     
     // Mergeable buffer support - inline storage for merged buffers (eliminates dynamic allocation)
-    // Design rationale:
-    //   - Pre-allocated inline arrays avoid heap allocation in the hot RX path
-    //   - Maximum packet size: 65535 bytes + 12-byte virtio header = 65547 bytes
-    //   - First buffer: ~4084 bytes (4096 - 12 header), Remaining: ~61463 bytes
-    //   - Additional buffers needed: ceil(61463 / 4096) = 15 buffers
-    //   - Total: 1 (primary) + 15 (additional) = 16 buffers, plus 1 safety margin = 17
+    // Maximum mergeable packet size per VirtIO spec: 65562 bytes (including 12-byte header)
+    // Required buffers: ceil(65562 / 4096) = 17 PAGE-sized buffers maximum
     // 
     // Field semantics:
     //   MergedBufferCount: Number of ADDITIONAL buffers (NOT including this descriptor)
     //                      Range: 0 (single buffer) to 16 (max merged packet)
     //   MergedBuffersInline: Array storing pointers to the 16 additional buffers
     //                        (this descriptor itself is not stored in the array)
-#define MAX_INLINE_MERGED_BUFFERS 16  // Supports up to 17-buffer packets (1 primary + 16 additional)
-    USHORT MergedBufferCount;  // Number of additional buffers (this one excluded)
-    pRxNetDescriptor MergedBuffersInline[MAX_INLINE_MERGED_BUFFERS];  // Additional buffers (this one excluded)
+#define MAX_MERGED_BUFFERS 16
+    USHORT MergedBufferCount;
+    pRxNetDescriptor MergedBuffers[MAX_MERGED_BUFFERS];
 };
 
 struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>

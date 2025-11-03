@@ -1165,11 +1165,6 @@ static void PrepareRXLayout(PARANDIS_ADAPTER *pContext)
     USHORT alignment = 32;
     ULONG rxPayloadSize;
     bool combineHeaderAndData = pContext->bAnyLayout;
-    
-    // Note: For mergeable buffers (bUseMergedBuffers=true), this layout is NOT used.
-    // CreateMergeableRxDescriptor uses hardcoded simple layout (1 page per buffer).
-    // This function only configures layout for traditional non-mergeable buffers.
-    
     if (combineHeaderAndData)
     {
         pContext->RxLayout.ReserveForHeader = 0;

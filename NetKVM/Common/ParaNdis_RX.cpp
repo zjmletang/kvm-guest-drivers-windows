@@ -6,11 +6,6 @@
 #include "ParaNdis_RX.tmh"
 #endif
 
-// Additional includes for merge buffer support
-extern "C" {
-#include <ntddk.h>
-}
-
 // define as 0 to allocate all the required buffer at once
 // #define INITIAL_RX_BUFFERS  0
 #define INITIAL_RX_BUFFERS 16
@@ -111,15 +106,10 @@ static void ParaNdis_FreeRxBufferDescriptor(PARANDIS_ADAPTER *pContext, pRxNetDe
 CParaNdisRX::CParaNdisRX()
 {
     InitializeListHead(&m_NetReceiveBuffers);
-    
-    // Initialize merge buffer context
-    NdisZeroMemory(&m_MergeContext, sizeof(m_MergeContext));
 }
 
 CParaNdisRX::~CParaNdisRX()
 {
-    // Clean up any active merge context
-    ReuseCollectedBuffers();
 }
 
 // called during initialization
@@ -216,12 +206,8 @@ int CParaNdisRX::PrepareReceiveBuffers()
 }
 
 // Simplified buffer creation for mergeable buffers - just 1 page per buffer
-// Requirements: VirtIO 1.0+ with ANY_LAYOUT (combined header+data in single descriptor)
-// Legacy VirtIO 0.95 devices should use traditional non-mergeable path for compatibility
 pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
-{
-    DPrintf(4, "[MERGEABLE] Creating mergeable RX descriptor (1 page, combined layout)");
-    
+{ 
     pRxNetDescriptor p = (pRxNetDescriptor)ParaNdis_AllocateMemory(m_Context, sizeof(*p));
     if (p == NULL)
     {
@@ -231,7 +217,6 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
 
     NdisZeroMemory(p, sizeof(*p));
 
-    // Single SG entry for combined header+data (ANY_LAYOUT mode)
     p->BufferSGArray = (struct VirtIOBufferDescriptor *)ParaNdis_AllocateMemory(m_Context, 
                                                                                sizeof(VirtIOBufferDescriptor));
     if (p->BufferSGArray == NULL)
@@ -240,10 +225,6 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
         goto error_exit;
     }
 
-    // Allocate PhysicalPages array with 2 entries to match ParaNdis_BindRxBufferToPacket expectations
-    // Design: Physical page aliasing - both PhysicalPages[0] and [1] will point to the same physical page
-    // Reason: ParaNdis_BindRxBufferToPacket always starts from PARANDIS_FIRST_RX_DATA_PAGE (index 1)
-    //         This aliasing avoids modifying the core binding logic while supporting mergeable mode
     p->PhysicalPages = (tCompletePhysicalAddress *)ParaNdis_AllocateMemory(m_Context, 
                                                                            sizeof(tCompletePhysicalAddress) * 2);
     if (p->PhysicalPages == NULL)
@@ -254,43 +235,29 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
 
     NdisZeroMemory(p->PhysicalPages, sizeof(tCompletePhysicalAddress) * 2);
 
-    // Save original pointer for restoration after merge operations
     p->OriginalPhysicalPages = p->PhysicalPages;
 
-    // Allocate exactly 1 page for mergeable buffer
     if (!ParaNdis_InitialAllocatePhysicalMemory(m_Context, PAGE_SIZE, &p->PhysicalPages[0]))
     {
         DPrintf(0, "ERROR: Failed to allocate physical memory (1 page = %u bytes)", PAGE_SIZE);
         goto error_exit;
     }
 
-    DPrintf(4, "Allocated 1 page: Virtual=%p, Physical=0x%llx", 
-            p->PhysicalPages[0].Virtual, p->PhysicalPages[0].Physical.QuadPart);
-
-    // Setup for mergeable buffer with ANY_LAYOUT (VirtIO 1.0+)
-    p->NumPages = 2;  // Always 2: PhysicalPages[0]=header, PhysicalPages[1]=data
-    p->HeaderPage = 0;  // Header at PhysicalPages[0]
-    p->DataStartOffset = (USHORT)m_Context->nVirtioHeaderSize;  // Offset past header to data
+    // Setup for mergeable buffer with ANY_LAYOUT
+    // Physical allocation: Only 1 page containing virtio header + payload
+    // Logical layout: NumPages=2 for compatibility
+    //   - PhysicalPages[0] and PhysicalPages[1] both point to the SAME physical page
+    //   - This aliasing allows legacy code to access data via index 1 without modification
+    p->NumPages = 2;
     p->NumOwnedPages = p->NumPages;
+    p->HeaderPage = 0;
+    p->DataStartOffset = (USHORT)m_Context->nVirtioHeaderSize;
+    p->PhysicalPages[1] = p->PhysicalPages[0];
     
     // Combined header and data in single SG entry (ANY_LAYOUT)
     p->BufferSGLength = 1;
     p->BufferSGArray[0].physAddr = p->PhysicalPages[0].Physical;
     p->BufferSGArray[0].length = PAGE_SIZE;
-    
-    // Create alias: PhysicalPages[1] points to the same physical memory as PhysicalPages[0]
-    // This allows ParaNdis_BindRxBufferToPacket to work without modification (it uses index 1)
-    // Cleanup is safe: IsRegionInside() detects the alias and skips freeing PhysicalPages[1]
-    p->PhysicalPages[1].Physical.QuadPart = p->PhysicalPages[0].Physical.QuadPart;
-    p->PhysicalPages[1].Virtual = p->PhysicalPages[0].Virtual;
-    p->PhysicalPages[1].size = PAGE_SIZE;
-
-    // No indirect area for mergeable buffers
-    p->IndirectArea.Physical.QuadPart = 0;
-    p->IndirectArea.Virtual = NULL;
-    p->IndirectArea.size = 0;
-
-    p->NumOwnedPages = p->NumPages;
 
     if (!ParaNdis_BindRxBufferToPacket(m_Context, p))
     {
@@ -298,8 +265,6 @@ pRxNetDescriptor CParaNdisRX::CreateMergeableRxDescriptor()
         goto error_exit;
     }
 
-    DPrintf(4, "Successfully created mergeable RX descriptor: NumPages=%u, SGLength=%u",
-            p->NumPages, p->BufferSGLength);
     return p;
 
 error_exit:
@@ -310,22 +275,18 @@ error_exit:
 pRxNetDescriptor CParaNdisRX::CreateRxDescriptorOnInit()
 {
     // For mergeable buffers with ANY_LAYOUT, use simplified allocation - just 1 page per buffer
-    // Note: VirtIO 1.0+ devices implicitly support ANY_LAYOUT behavior (per spec section 2.1.2)
-    // Legacy VirtIO 0.95 devices without ANY_LAYOUT are not supported in mergeable mode
     if (m_Context->bUseMergedBuffers && m_Context->bAnyLayout)
     {
-        DPrintf(4, "Using mergeable buffer allocation (small buffers, combined layout)");
+        DPrintf(5, "Using mergeable buffer allocation (small buffers, combined layout)");
         return CreateMergeableRxDescriptor();
     }
     
-    // Legacy path: either non-mergeable or old VirtIO 0.95 without ANY_LAYOUT
+    // Legacy path: either non-mergeable or without ANY_LAYOUT
     if (m_Context->bUseMergedBuffers && !m_Context->bAnyLayout)
     {
-        DPrintf(0, "WARNING: Mergeable buffers require ANY_LAYOUT support (VirtIO 1.0+), falling back to traditional mode");
+        DPrintf(0, "WARNING: Mergeable buffers require ANY_LAYOUT support, falling back to traditional mode");
     }
     
-    DPrintf(4, "Using traditional buffer allocation (large buffers)");;
-    // Original complex logic for non-mergeable buffers
     // For RX packets we allocate following pages
     //   X pages needed to fit most of data payload (or all the payload)
     //   1 page or less for virtio header, indirect buffers array and the data tail if any
@@ -443,9 +404,6 @@ pRxNetDescriptor CParaNdisRX::CreateRxDescriptorOnInit()
         goto error_exit;
     }
 
-    // Mark owned pages for cleanup (do not count borrowed pages from merge)
-    p->NumOwnedPages = p->NumPages;
-
     return p;
 
 error_exit:
@@ -525,20 +483,15 @@ void CParaNdisRX::FreeRxDescriptorsFromList()
 //   - Clears MergedBufferCount
 void CParaNdisRX::DisassembleMergedPacket(pRxNetDescriptor pBuffer)
 {
-    // Step 1: Free the extended MDL chain created during merge assembly
-    // The original buffer's MDL still exists and will be reused
-    // We only need to free MDLs for pages beyond the original 2 pages
     PMDL pMDL = pBuffer->Holder;
     USHORT mdlCount = 0;
     
-    // Skip the first buffer's original MDL (which covers the original 2 pages)
     while (pMDL && mdlCount < 1)
     {
         pMDL = NDIS_MDL_LINKAGE(pMDL);
         mdlCount++;
     }
     
-    // Free extended MDLs (for merged additional buffers)
     while (pMDL)
     {
         PMDL pNextMDL = NDIS_MDL_LINKAGE(pMDL);
@@ -546,29 +499,20 @@ void CParaNdisRX::DisassembleMergedPacket(pRxNetDescriptor pBuffer)
         pMDL = pNextMDL;
     }
     
-    // Terminate the MDL chain after the first MDL
     pMDL = pBuffer->Holder;
     if (pMDL)
     {
         NDIS_MDL_LINKAGE(pMDL) = NULL;
     }
     
-    // Step 2: Restore PhysicalPages to original array
     if (pBuffer->PhysicalPages != pBuffer->OriginalPhysicalPages)
     {
-        // Was using inline array, restore to original small array
         pBuffer->PhysicalPages = pBuffer->OriginalPhysicalPages;
     }
     
-    // Step 3: Restore NumPages and NumOwnedPages to original values (2 for mergeable)
     pBuffer->NumPages = 2;
     pBuffer->NumOwnedPages = 2;
-    
-    // Step 4: Clear merge state - this buffer is no longer a merged packet
     pBuffer->MergedBufferCount = 0;
-    
-    DPrintf(5, "Disassembled merged packet: restored to original state (NumPages=%u, NumOwnedPages=%u)",
-            pBuffer->NumPages, pBuffer->NumOwnedPages);
 }
 
 void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
@@ -586,12 +530,7 @@ void CParaNdisRX::ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor)
         //       assembled packet in AssembleMergedPacket, so their original MDLs are intact)
         for (USHORT i = 0; i < pBuffersDescriptor->MergedBufferCount; i++)
         {
-            pRxNetDescriptor pAdditionalBuffer = pBuffersDescriptor->MergedBuffersInline[i];
-            if (pAdditionalBuffer)
-            {
-                // Recursively reuse each additional buffer
-                ReuseReceiveBufferNoLock(pAdditionalBuffer);
-            }
+            ReuseReceiveBufferNoLock(pBuffersDescriptor->MergedBuffers[i]);
         }
         
         // Disassemble the first buffer back to its original single-buffer state
@@ -833,7 +772,6 @@ static void LogRedirectedPacket(pRxNetDescriptor pBufferDescriptor)
 }
 #endif
 
-// Common packet processing logic - extracted from ProcessRxRing and ProcessMergedBuffers
 // Handles packet analysis, filtering, RSS processing, and queue assignment
 void CParaNdisRX::ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHAR nCurrCpuReceiveQueue)
 {
@@ -841,7 +779,7 @@ void CParaNdisRX::ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHA
     PVOID data = pBufferDescriptor->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
     data = RtlOffsetToPointer(data, pBufferDescriptor->DataStartOffset);
 
-    // Analyze packet (MAC-based analysis + L3 header info)
+    // basic MAC-based analysis + L3 header info
     BOOLEAN packetAnalysisRC = ParaNdis_AnalyzeReceivedPacket(data,
                                                               pBufferDescriptor->PacketInfo.dataLength,
                                                               &pBufferDescriptor->PacketInfo);
@@ -854,23 +792,20 @@ void CParaNdisRX::ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHA
         return;
     }
 
-    // Apply packet filtering
+    // filtering based on prev stage analysis
     if (!ShallPassPacket(m_Context, &pBufferDescriptor->PacketInfo))
     {
-        ReuseReceiveBufferNoLock(pBufferDescriptor);
+        pBufferDescriptor->Queue->ReuseReceiveBufferNoLock(pBufferDescriptor);
         m_Context->Statistics.ifInDiscards++;
         m_Context->extraStatistics.framesFilteredOut++;
         return;
     }
 
 #ifdef PARANDIS_SUPPORT_RSS
-    // RSS hash analysis
     if (m_Context->RSSParameters.RSSMode != PARANDIS_RSS_MODE::PARANDIS_RSS_DISABLED)
     {
         ParaNdis6_RSSAnalyzeReceivedPacket(&m_Context->RSSParameters, data, &pBufferDescriptor->PacketInfo);
     }
-
-    // Determine target receive queue based on RSS
     CCHAR nTargetReceiveQueueNum;
     GROUP_AFFINITY TargetAffinity;
     PROCESSOR_NUMBER TargetProcessor;
@@ -890,9 +825,11 @@ void CParaNdisRX::ProcessReceivedPacket(pRxNetDescriptor pBufferDescriptor, CCHA
 
         if (nTargetReceiveQueueNum != nCurrCpuReceiveQueue)
         {
-            // Cross-CPU packet - need to notify target queue
             if (m_Context->bPollModeEnabled)
             {
+                // ensure the NDIS just schedules the other poll and does not do anything
+                // otherwise if both polls are configured to the same CPU
+                // this may cause a deadlock in return nbl path
                 KIRQL prev = KeRaiseIrqlToSynchLevel();
                 ParaNdisPollNotify(m_Context, nTargetReceiveQueueNum, "RSS");
                 KeLowerIrql(prev);
@@ -1025,10 +962,9 @@ VOID ParaNdis_ResetRxClassification(PARANDIS_ADAPTER *pContext)
 // Merge Buffer Implementation Functions
 //
 
-// ProcessMergedBuffers: Pure assembly function
-// Handles both single-buffer and multi-buffer packets when mergeable feature is enabled
-// Returns assembled descriptor or original descriptor (for single buffer) or NULL on failure
-// Does NOT process the packet - caller is responsible for calling ProcessReceivedPacket
+// Handle mergeable buffer packets: fast path for single buffer, assembly for multi-buffer
+// Returns: original descriptor (single buffer), assembled descriptor (multi-buffer), or NULL (error)
+// Note: Caller must call ProcessReceivedPacket on returned descriptor
 pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer, UINT nFullLength)
 {
     virtio_net_hdr_mrg_rxbuf *pHeader = (virtio_net_hdr_mrg_rxbuf *)pFirstBuffer->PhysicalPages[pFirstBuffer->HeaderPage].Virtual;
@@ -1055,7 +991,7 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
     }
     
     // Multi-buffer case - assemble the packet
-    DPrintf(3, "Multi-buffer packet detected: %u buffers required", numBuffers);
+    DPrintf(5, "Multi-buffer packet detected: %u buffers required", numBuffers);
     
     // Initialize merge context (only fields that need initialization)
     m_MergeContext.ExpectedBuffers = numBuffers;
@@ -1071,7 +1007,7 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
     pFirstBuffer->PacketInfo.dataLength = firstBufferDataLength;
     m_MergeContext.TotalPacketLength += firstBufferDataLength;
     
-    DPrintf(4, "Added first buffer (%u/%u), current total length: %u bytes",
+    DPrintf(5, "Added first buffer (%u/%u), current total length: %u bytes",
             m_MergeContext.CollectedBuffers, m_MergeContext.ExpectedBuffers, m_MergeContext.TotalPacketLength);
     
     // Collect remaining buffers
@@ -1085,24 +1021,21 @@ pRxNetDescriptor CParaNdisRX::ProcessMergedBuffers(pRxNetDescriptor pFirstBuffer
     }
     
     // All buffers collected, assemble the packet
-    DPrintf(3, "All %u buffers collected, assembling packet (total: %u bytes)",
+    DPrintf(5, "All %u buffers collected, assembling packet (total: %u bytes)",
             m_MergeContext.CollectedBuffers, m_MergeContext.TotalPacketLength);
     
     pRxNetDescriptor pAssembledBuffer = AssembleMergedPacket();
     if (!pAssembledBuffer)
     {
-        // Assembly failed
         DPrintf(0, "ERROR: Failed to assemble merged packet");
         ReuseCollectedBuffers();
         return NULL;
     }
     
-    DPrintf(3, "Successfully assembled packet: %u buffers -> %u bytes",
+    DPrintf(5, "Successfully assembled packet: %u buffers -> %u bytes",
             m_MergeContext.CollectedBuffers, 
             m_MergeContext.TotalPacketLength);
     
-    // Note: Merge context cleanup not needed - buffers transferred to pAssembledBuffer
-    // and context will be reinitialized on next merge operation
     return pAssembledBuffer;
 }
 
@@ -1156,7 +1089,7 @@ BOOLEAN CParaNdisRX::CollectRemainingMergeBuffers()
                 m_MergeContext.CollectedBuffers, nFullLength, m_MergeContext.TotalPacketLength);
     }
     
-    DPrintf(4, "All %u buffers collected successfully, total packet length: %u bytes",
+    DPrintf(5, "All %u buffers collected successfully, total packet length: %u bytes",
             m_MergeContext.CollectedBuffers, m_MergeContext.TotalPacketLength);
     return TRUE;
 }
@@ -1174,10 +1107,10 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     UINT additionalBuffers = m_MergeContext.CollectedBuffers - 1;
     
     // CRITICAL: Prevent buffer overflow - inline array has limited capacity
-    if (additionalBuffers > MAX_INLINE_MERGED_BUFFERS)
+    if (additionalBuffers > MAX_MERGED_BUFFERS)
     {
-        DPrintf(0, "ERROR: Too many merged buffers %u (max inline: %u) - dropping packet",
-                m_MergeContext.CollectedBuffers, MAX_INLINE_MERGED_BUFFERS + 1);
+        DPrintf(0, "ERROR: Too many merged buffers %u (max: %u) - dropping packet",
+                m_MergeContext.CollectedBuffers, MAX_MERGED_BUFFERS + 1);
         
         ReuseCollectedBuffers();
         return NULL;
@@ -1186,38 +1119,22 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     // Copy buffer pointers to inline array (no allocation needed!)
     for (UINT i = 0; i < additionalBuffers; i++)
     {
-        pAssembledBuffer->MergedBuffersInline[i] = m_MergeContext.BufferSequence[i + 1];
+        pAssembledBuffer->MergedBuffers[i] = m_MergeContext.BufferSequence[i + 1];
     }
     // MergedBufferCount = number of ADDITIONAL buffers (not including this one)
     pAssembledBuffer->MergedBufferCount = (USHORT)additionalBuffers;
     
     // Calculate total pages needed for merged packet:
     // - First buffer: 2 logical pages (PhysicalPages[0] and [1] are aliases of the same physical page)
-    // - Each additional buffer: 1 page (we only use their data page, skip their header page)
+    // - Each additional buffer: 1 page (subsequent buffers contain only data, no virtio header)
     // Formula: totalPages = 2 (first buffer) + (CollectedBuffers - 1) (additional buffers)
     //        = 1 + CollectedBuffers
     USHORT totalPages = 1 + m_MergeContext.CollectedBuffers;
     
-    // Switch to pre-allocated inline array to hold all pages from merged buffers
-    // Note: For multi-buffer packets, totalPages is always > 2 (first buffer's NumPages)
-    // so this switch always happens in the merge path
+    pAssembledBuffer->PhysicalPages = m_MergeContext.PhysicalPages;
     
-    // Validate totalPages is within bounds (should never exceed due to VirtIO spec)
-    if (totalPages > MAX_MERGED_PHYSICAL_PAGES)
-    {
-        DPrintf(0, "CRITICAL: totalPages=%u exceeds MAX_MERGED_PHYSICAL_PAGES=%u - this should never happen!",
-                totalPages, MAX_MERGED_PHYSICAL_PAGES);
-        return NULL;
-    }
-    
-    // Copy first buffer's 2 pages to inline array
-    m_MergeContext.InlinePhysicalPages[0] = pAssembledBuffer->PhysicalPages[0];
-    m_MergeContext.InlinePhysicalPages[1] = pAssembledBuffer->PhysicalPages[1];
-    
-    // Switch to inline array (will be restored on reuse)
-    pAssembledBuffer->PhysicalPages = m_MergeContext.InlinePhysicalPages;
-    
-    DPrintf(5, "Switched to inline PhysicalPages array: totalPages=%u", totalPages);
+    pAssembledBuffer->PhysicalPages[0] = pAssembledBuffer->OriginalPhysicalPages[0];
+    pAssembledBuffer->PhysicalPages[1] = pAssembledBuffer->OriginalPhysicalPages[1];
     
     // Copy additional buffer pages into the inline PhysicalPages array
     // Start filling from index 2 (after first buffer's 2 pages)
@@ -1226,9 +1143,6 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     {
         pRxNetDescriptor pBuffer = m_MergeContext.BufferSequence[i];
         
-        // Extract data page from subsequent buffer using PARANDIS_FIRST_RX_DATA_PAGE (index 1)
-        // Note: For subsequent buffers, PhysicalPages[0] is header area (unused),
-        //       PhysicalPages[1] contains the actual data (full buffer or alias)
         pAssembledBuffer->PhysicalPages[destPageIdx].Virtual = pBuffer->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Virtual;
         pAssembledBuffer->PhysicalPages[destPageIdx].Physical = pBuffer->PhysicalPages[PARANDIS_FIRST_RX_DATA_PAGE].Physical;
         pAssembledBuffer->PhysicalPages[destPageIdx].size = m_MergeContext.BufferActualLengths[i];
@@ -1241,7 +1155,6 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
     // Now create NEW MDLs for additional buffers covering their FULL payload
     // IMPORTANT: For subsequent buffers in mergeable mode, the ENTIRE buffer contains payload data
     // (no virtio header), so we must create MDLs covering the full buffer from offset 0,
-    // NOT reuse the existing Holder MDLs which may have been created with wrong assumptions
     PMDL pPreviousMDL = NULL;
     PMDL pCurrentMDL = pAssembledBuffer->Holder;
     
@@ -1252,12 +1165,9 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
         pCurrentMDL = NDIS_MDL_LINKAGE(pCurrentMDL);
     }
     
-    // Create new MDLs for additional buffers covering their FULL payload
-    // (subsequent buffers in mergeable RX have NO virtio header, just pure data)
     for (UINT i = 1; i < m_MergeContext.CollectedBuffers; i++)
     {
         // For subsequent buffers: create MDL for FULL buffer (no header to skip)
-        // Use PARANDIS_FIRST_RX_DATA_PAGE for consistency with ParaNdis_BindRxBufferToPacket
         // (PhysicalPages[0] and [1] are aliased in mergeable mode, so functionally equivalent)
         // Use actual received length instead of allocated buffer size
         PMDL pNewMDL = NdisAllocateMdl(m_Context->MiniportHandle,
@@ -1266,21 +1176,17 @@ pRxNetDescriptor CParaNdisRX::AssembleMergedPacket()
         if (!pNewMDL)
         {
             DPrintf(0, "ERROR: Failed to allocate MDL for buffer %u, aborting packet assembly", i);
-            // Return NULL - DisassembleMergedPacket will clean up partial state
+            // DisassembleMergedPacket will clean up partial state
             return NULL;
         }
         
-        // Chain this new MDL to the end of the assembled packet's MDL chain
         NDIS_MDL_LINKAGE(pPreviousMDL) = pNewMDL;
         
         NDIS_MDL_LINKAGE(pNewMDL) = NULL;
         pPreviousMDL = pNewMDL;
-        
-        // Note: BufferSequence[i]->Holder will be freed when ReuseReceiveBufferNoLock is called
-        // The new MDL we created will be freed when pAssembledBuffer's packet is returned
     }
     
-    DPrintf(4, "Assembled packet: %u buffers, %u total pages, %u bytes",
+    DPrintf(5, "Assembled packet: %u buffers, %u total pages, %u bytes",
             m_MergeContext.CollectedBuffers, totalPages, m_MergeContext.TotalPacketLength);
     
     return pAssembledBuffer;
@@ -1294,5 +1200,4 @@ void CParaNdisRX::ReuseCollectedBuffers()
     {
         ReuseReceiveBufferNoLock(m_MergeContext.BufferSequence[i]);
     }
-    // Note: Context state will be reinitialized before next merge operation
 }

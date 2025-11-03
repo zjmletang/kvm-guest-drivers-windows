@@ -83,7 +83,7 @@ class CParaNdisRX : public CParaNdisTemplatePath<CVirtQueue>, public CNdisAlloca
         UINT32 TotalPacketLength;
         
         // Pre-allocated array for merged packet assembly (eliminates allocate/copy/free in hot path)
-        tCompletePhysicalAddress InlinePhysicalPages[MAX_MERGED_PHYSICAL_PAGES];
+        tCompletePhysicalAddress PhysicalPages[MAX_MERGED_PHYSICAL_PAGES];
     } m_MergeContext;
 
     void ReuseReceiveBufferNoLock(pRxNetDescriptor pBuffersDescriptor);
