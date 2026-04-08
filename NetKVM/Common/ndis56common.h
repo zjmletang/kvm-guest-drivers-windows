@@ -623,6 +623,7 @@ struct _PARANDIS_ADAPTER : public CNdisAllocatable<_PARANDIS_ADAPTER, 'DCTX'>
 
     PIO_INTERRUPT_MESSAGE_INFO pMSIXInfoTable = NULL;
     NDIS_HANDLE DmaHandle = NULL;
+    ULONG SGListBufferSize = 0;
     ULONG ulIrqReceived = 0;
     NDIS_OFFLOAD ReportedOffloadCapabilities = {};
     NDIS_OFFLOAD ReportedOffloadConfiguration = {};

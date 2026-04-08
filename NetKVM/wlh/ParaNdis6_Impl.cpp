@@ -725,6 +725,7 @@ NDIS_STATUS ParaNdis_FinishSpecificInitialization(PARANDIS_ADAPTER *pContext)
         else
         {
             DPrintf(0, "SG recommended size %d", sgDesc.ScatterGatherListSize);
+            pContext->SGListBufferSize = sgDesc.ScatterGatherListSize;
         }
     }
 
@@ -783,27 +784,27 @@ static ULONG HashReportToHashType(USHORT report)
 {
     static const ULONG table[VIRTIO_NET_HASH_REPORT_MAX + 1] = {
 #if (NDIS_SUPPORT_NDIS680)
-        0,
-        NDIS_HASH_IPV4,
-        NDIS_HASH_TCP_IPV4,
-        NDIS_HASH_UDP_IPV4,
-        NDIS_HASH_IPV6,
-        NDIS_HASH_TCP_IPV6,
-        NDIS_HASH_UDP_IPV6,
-        NDIS_HASH_IPV6_EX,
-        NDIS_HASH_TCP_IPV6_EX,
-        NDIS_HASH_UDP_IPV6_EX
+                                                                                                        0,
+                                                                                                        NDIS_HASH_IPV4,
+                                                                                                        NDIS_HASH_TCP_IPV4,
+                                                                                                        NDIS_HASH_UDP_IPV4,
+                                                                                                        NDIS_HASH_IPV6,
+                                                                                                        NDIS_HASH_TCP_IPV6,
+                                                                                                        NDIS_HASH_UDP_IPV6,
+                                                                                                        NDIS_HASH_IPV6_EX,
+                                                                                                        NDIS_HASH_TCP_IPV6_EX,
+                                                                                                        NDIS_HASH_UDP_IPV6_EX
 #else
-        0,
-        NDIS_HASH_IPV4,
-        NDIS_HASH_TCP_IPV4,
-        0,
-        NDIS_HASH_IPV6,
-        NDIS_HASH_TCP_IPV6,
-        0,
-        NDIS_HASH_IPV6_EX,
-        NDIS_HASH_TCP_IPV6_EX,
-        0
+                                                                                                        0,
+                                                                                                        NDIS_HASH_IPV4,
+                                                                                                        NDIS_HASH_TCP_IPV4,
+                                                                                                        0,
+                                                                                                        NDIS_HASH_IPV6,
+                                                                                                        NDIS_HASH_TCP_IPV6,
+                                                                                                        0,
+                                                                                                        NDIS_HASH_IPV6_EX,
+                                                                                                        NDIS_HASH_TCP_IPV6_EX,
+                                                                                                        0
 #endif
     };
     if (report > VIRTIO_NET_HASH_REPORT_MAX)

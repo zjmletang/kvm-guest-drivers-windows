@@ -349,6 +349,7 @@ CParaNdisTX::~CParaNdisTX()
     }
 
     FreeExtraPages();
+    FreeSGListBuffers();
 }
 
 bool CParaNdisTX::Create(PPARANDIS_ADAPTER Context, UINT DeviceQueueIndex)
@@ -361,6 +362,7 @@ bool CParaNdisTX::Create(PPARANDIS_ADAPTER Context, UINT DeviceQueueIndex)
 
     m_nbPool.Create(Context->MiniportHandle);
     m_nblPool.Create(Context->MiniportHandle);
+    ExInitializeSListHead(&m_SGListBuffers);
 
     CreatePath();
 
@@ -514,6 +516,60 @@ void CParaNdisTX::NBLMappingDone(CNBL *NBLHolder)
         m_Context->Statistics.ifOutErrors += NBLHolder->NumberOfBuffers();
         NBLHolder->UnsetInChain();
         NBLHolder->Release();
+    }
+}
+
+void CParaNdisTX::FreeSGListBuffers()
+{
+    for (;;)
+    {
+        auto entry = ExInterlockedPopEntrySList(&m_SGListBuffers, NULL);
+        if (!entry)
+        {
+            break;
+        }
+        auto buf = CONTAINING_RECORD(entry, CSGListBuffer, SListEntry);
+        NdisFreeMemoryWithTagPriority(m_Context->MiniportHandle, buf->Buffer, 'LGSR');
+        NdisFreeMemoryWithTagPriority(m_Context->MiniportHandle, buf, 'LGSR');
+    }
+}
+
+CSGListBuffer *CParaNdisTX::BorrowSGListBuffer()
+{
+    auto entry = ExInterlockedPopEntrySList(&m_SGListBuffers, NULL);
+    if (entry)
+    {
+        return CONTAINING_RECORD(entry, CSGListBuffer, SListEntry);
+    }
+    if (!m_Context->SGListBufferSize)
+    {
+        return nullptr;
+    }
+    auto buf = (CSGListBuffer *)NdisAllocateMemoryWithTagPriority(m_Context->MiniportHandle,
+                                                                  sizeof(CSGListBuffer),
+                                                                  'LGSR',
+                                                                  NormalPoolPriority);
+    if (buf)
+    {
+        buf->Size = m_Context->SGListBufferSize;
+        buf->Buffer = NdisAllocateMemoryWithTagPriority(m_Context->MiniportHandle,
+                                                        buf->Size,
+                                                        'LGSR',
+                                                        NormalPoolPriority);
+        if (!buf->Buffer)
+        {
+            NdisFreeMemoryWithTagPriority(m_Context->MiniportHandle, buf, 'LGSR');
+            buf = nullptr;
+        }
+    }
+    return buf;
+}
+
+void CParaNdisTX::ReturnSGListBuffer(CSGListBuffer *buf)
+{
+    if (buf)
+    {
+        ExInterlockedPushEntrySList(&m_SGListBuffers, &buf->SListEntry, NULL);
     }
 }
 
@@ -1079,6 +1135,10 @@ CNB::~CNB()
     {
         NdisMFreeNetBufferSGList(m_Context->DmaHandle, m_SGL, m_NB);
     }
+    if (m_SGListBuffer)
+    {
+        m_ParentNBL->GetParentTXPath()->ReturnSGListBuffer(m_SGListBuffer);
+    }
     if (m_ExtraNBStorage)
     {
         // for unknown case it was not freed before
@@ -1093,14 +1153,32 @@ void CNB::ReleaseResources()
         NdisMFreeNetBufferSGList(m_Context->DmaHandle, m_SGL, m_NB);
         m_SGL = nullptr;
     }
+    if (m_SGListBuffer)
+    {
+        m_ParentNBL->GetParentTXPath()->ReturnSGListBuffer(m_SGListBuffer);
+        m_SGListBuffer = nullptr;
+    }
 }
 
 bool CNB::ScheduleBuildSGListForTx()
 {
     NETKVM_ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 
-    return NdisMAllocateNetBufferSGList(m_Context->DmaHandle, m_NB, this, NDIS_SG_LIST_WRITE_TO_DEVICE, nullptr, 0) ==
-           NDIS_STATUS_SUCCESS;
+    PVOID sgBuffer = nullptr;
+    ULONG sgBufSize = 0;
+    m_SGListBuffer = m_ParentNBL->GetParentTXPath()->BorrowSGListBuffer();
+    if (m_SGListBuffer)
+    {
+        sgBuffer = m_SGListBuffer->Buffer;
+        sgBufSize = m_SGListBuffer->Size;
+    }
+
+    return NdisMAllocateNetBufferSGList(m_Context->DmaHandle,
+                                        m_NB,
+                                        this,
+                                        NDIS_SG_LIST_WRITE_TO_DEVICE,
+                                        sgBuffer,
+                                        sgBufSize) == NDIS_STATUS_SUCCESS;
 }
 
 void CNB::PopulateIPLength(IPHeader *IpHeader, USHORT IpLength) const

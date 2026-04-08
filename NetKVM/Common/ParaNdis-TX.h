@@ -27,6 +27,13 @@ typedef enum class _tagNBMappingStatus
     FAILURE
 } NBMappingStatus;
 
+struct CSGListBuffer
+{
+    SLIST_ENTRY SListEntry;
+    PVOID Buffer;
+    ULONG Size;
+};
+
 struct CExtendedNBStorage
 {
     ULONG m_UsedPagesCount;
@@ -101,6 +108,7 @@ class CNB : public CNdisAllocatableViaHelper<CNB>
     CNBL *m_ParentNBL;
     PPARANDIS_ADAPTER m_Context;
     PSCATTER_GATHER_LIST m_SGL = nullptr;
+    CSGListBuffer *m_SGListBuffer = nullptr;
     CExtendedNBStorage *m_ExtraNBStorage = nullptr;
 
     CNB(const CNB &) = delete;
@@ -480,6 +488,8 @@ class CParaNdisTX : public CParaNdisTemplatePath<CTXVirtQueue>, public CNdisAllo
 
     bool BorrowPages(CExtendedNBStorage *extraNBStorage, ULONG NeedPages);
     void ReturnPages(CExtendedNBStorage *extraNBStorage);
+    CSGListBuffer *BorrowSGListBuffer();
+    void ReturnSGListBuffer(CSGListBuffer *buf);
     void CheckStuckPackets(ULONG GraceTimeMillies);
 
   private:
@@ -510,6 +520,7 @@ class CParaNdisTX : public CParaNdisTemplatePath<CTXVirtQueue>, public CNdisAllo
 
     bool AllocateExtraPages();
     void FreeExtraPages();
+    void FreeSGListBuffers();
 
     ULONG IsStuck();
 
@@ -525,6 +536,7 @@ class CParaNdisTX : public CParaNdisTemplatePath<CTXVirtQueue>, public CNdisAllo
     CNdisSpinLock m_WaitingListLock;
 
     CRawPageList m_ExtraPages;
+    SLIST_HEADER m_SGListBuffers;
 
     struct
     {
