@@ -1,7 +1,9 @@
 import socket
 import subprocess
+import signal
 import platform
 import os
+import re
 import xml.etree.ElementTree as ET
 
 IS_WINDOWS = platform.system() == "Windows"
@@ -9,26 +11,53 @@ NTTTCP_CLIENT = "ntttcp.exe" if IS_WINDOWS else "ntttcp"
 
 last_results = "0.0:0.0:0"
 
+def detect_interface(target_ip):
+    """Auto-detect network interface name for a given target IP via routing table."""
+    try:
+        out = subprocess.check_output(["ip", "route", "get", target_ip],
+                                      text=True, stderr=subprocess.DEVNULL)
+        m = re.search(r'dev\s+(\S+)', out)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
 def parse_sender_xml(xml_file):
     """Parse sender's XML output for throughput, CPU, and PPS."""
     mbps, cpu, pps = 0.0, 0.0, 0
     try:
         tree = ET.parse(xml_file)
         root = tree.getroot()
-        realtime = float(root.findtext('realtime', '0'))
-        for elem in root.findall('throughput'):
-            if elem.get('metric') == 'mbps':
-                mbps = round(float(elem.text), 2)
-                break
-        pkts = int(root.findtext('packets_sent', '0'))
-        if pkts > 0 and realtime > 0:
-            pps = int(pkts / realtime)
         if IS_WINDOWS:
-            cpu = round(float(root.findtext('cpu', '0')), 2)
+            for elem in root.findall('throughput'):
+                if elem.get('metric') == 'mbps':
+                    mbps = round(float(elem.text), 2)
+                    break
+            for elem in root.findall('realtime'):
+                if elem.get('metric') == 's':
+                    realtime = float(elem.text)
+                    break
+            else:
+                realtime = 0
+            pkts = int(root.findtext('packets_sent', '0'))
+            if pkts > 0 and realtime > 0:
+                pps = int(pkts / realtime)
+            for elem in root.findall('cpu'):
+                if elem.get('metric') == '%':
+                    cpu = round(float(elem.text), 2)
+                    break
         else:
+            realtime = float(root.findtext('realtime', '0'))
+            for elem in root.findall('throughput'):
+                if elem.get('metric') == 'mbps':
+                    mbps = round(float(elem.text), 2)
+                    break
+            pkts = int(root.findtext('packets_sent', '0'))
+            if pkts > 0 and realtime > 0:
+                pps = int(pkts / realtime)
+            user = float(root.findtext('user', '0'))
             softirq = float(root.findtext('softirq', '0'))
             system = float(root.findtext('system', '0'))
-            cpu = round(softirq + system, 2)
+            cpu = round(user + system + softirq, 2)
     except Exception as e:
         print(f"  XML parse error: {e}")
     return mbps, cpu, pps
@@ -49,30 +78,57 @@ def start_sender_service():
                 if not data:
                     continue
 
-                # Return last test results
                 if data == "RESULTS":
                     conn.sendall(last_results.encode())
                     continue
 
-                parts = data.split(':')
-                if len(parts) < 6:
+                if data == "PLATFORM":
+                    conn.sendall(platform.system().encode())
                     continue
 
-                proto, size, threads, target_ip, no_nagle, duration = parts
+                parts = data.split(':')
+                if len(parts) < 5:
+                    continue
+
+                proto, size, threads, target_ip, duration = parts[:5]
+                no_sync = parts[5] if len(parts) > 5 else "0"
                 is_udp = "-u" if proto == "UDP" else ""
 
                 if IS_WINDOWS:
-                    nagle_flag = "-ndl" if (proto == "TCP" and no_nagle == "1") else ""
-                    cmd = f"{NTTTCP_CLIENT} -s -m {threads},*,{target_ip} {is_udp} {nagle_flag} -l {size} -t {duration} -ns -xml {xml_file}"
+                    timeout_ms = (int(duration) + 30) * 1000
+                    ns_flag = "-ns" if no_sync == "1" else ""
+                    cmd = f"{NTTTCP_CLIENT} -s -m {threads},*,{target_ip} {is_udp} -l {size} -t {duration} -to {timeout_ms} {ns_flag} -xml {xml_file}"
                 else:
-                    cmd = f"{NTTTCP_CLIENT} -s {is_udp} -P {threads} -N -t {duration} -x {xml_file} {target_ip}"
+                    # Linux ntttcp: -b for buffer size, -N always (no sync compatible with Windows)
+                    nic = detect_interface(target_ip)
+                    k_flag = f"--show-nic-packets {nic}" if nic else ""
+                    cmd = f"{NTTTCP_CLIENT} -s{target_ip} {is_udp} -b {size} -P {threads} -N {k_flag} -t {duration} -x {xml_file}"
 
                 print(f"[!] Executing: {cmd}")
                 if os.path.exists(xml_file):
                     os.remove(xml_file)
-                subprocess.run(cmd, shell=True, capture_output=True)
+                timeout_s = int(duration) + 60
+                if IS_WINDOWS:
+                    try:
+                        subprocess.run(cmd, shell=True, capture_output=True,
+                                       timeout=timeout_s)
+                    except subprocess.TimeoutExpired:
+                        print(f"[!] WARNING: ntttcp timed out after {duration}s + 60s margin")
+                else:
+                    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                            preexec_fn=os.setsid)
+                    try:
+                        proc.communicate(timeout=timeout_s)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        proc.communicate()
+                        print(f"[!] WARNING: ntttcp timed out after {duration}s + 60s margin")
 
-                mbps, cpu, pps = parse_sender_xml(xml_file)
+                if os.path.exists(xml_file):
+                    mbps, cpu, pps = parse_sender_xml(xml_file)
+                else:
+                    mbps, cpu, pps = 0.0, 0.0, 0
                 last_results = f"{mbps}:{cpu}:{pps}"
                 print(f"[=] Send stats: Thr={mbps}Mbps CPU={cpu}% PPS={pps}")
 
