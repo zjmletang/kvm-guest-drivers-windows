@@ -5,6 +5,8 @@ VisualStudioVersion = 16.0.31702.278
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "stdvga", "stdvga.vcxproj", "{AFA6734D-CD82-4581-93F1-925D5C843F7A}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "stdvgares", "tools\stdvgares\stdvgares.vcxproj", "{7D815864-E9DD-4E1A-9B68-2E647C4DA5D4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Win10 Release|x64 = Win10 Release|x64
@@ -15,6 +17,10 @@ Global
 		{AFA6734D-CD82-4581-93F1-925D5C843F7A}.Win10 Release|x64.Build.0 = Win10 Release|x64
 		{AFA6734D-CD82-4581-93F1-925D5C843F7A}.Win11 Release|x64.ActiveCfg = Win11 Release|x64
 		{AFA6734D-CD82-4581-93F1-925D5C843F7A}.Win11 Release|x64.Build.0 = Win11 Release|x64
+		{7D815864-E9DD-4E1A-9B68-2E647C4DA5D4}.Win10 Release|x64.ActiveCfg = Win10 Release|x64
+		{7D815864-E9DD-4E1A-9B68-2E647C4DA5D4}.Win10 Release|x64.Build.0 = Win10 Release|x64
+		{7D815864-E9DD-4E1A-9B68-2E647C4DA5D4}.Win11 Release|x64.ActiveCfg = Win11 Release|x64
+		{7D815864-E9DD-4E1A-9B68-2E647C4DA5D4}.Win11 Release|x64.Build.0 = Win11 Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
