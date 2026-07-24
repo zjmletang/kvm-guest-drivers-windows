@@ -64,29 +64,9 @@ typedef struct _STDVGA_CURRENT_MODE
 } STDVGA_CURRENT_MODE, *PSTDVGA_CURRENT_MODE;
 
 //
-// Per-device context (created by DxgkDdiCreateDevice).
-//
-typedef struct _STDVGA_DEVICE
-{
-    struct _STDVGA_DEVICE_CONTEXT *pAdapter;
-    HANDLE hDevice;
-} STDVGA_DEVICE, *PSTDVGA_DEVICE;
-
-//
-// Allocation private driver data (stored with each allocation).
-//
-typedef struct _STDVGA_ALLOCATION
-{
-    UINT Width;
-    UINT Height;
-    UINT Pitch;
-    UINT BytesPerPixel;
-    BOOLEAN IsPrimary;
-    D3DDDIFORMAT Format;
-} STDVGA_ALLOCATION, *PSTDVGA_ALLOCATION;
-
-//
-// Per-adapter device context.
+// Per-adapter device context. This driver only implements the KMDOD
+// display-only miniport surface (PresentDisplayOnly / VidPn / SystemDisplay
+// DDIs); there is no full WDDM device/allocation/scheduler state to track.
 //
 typedef struct _STDVGA_DEVICE_CONTEXT
 {
@@ -102,7 +82,4 @@ typedef struct _STDVGA_DEVICE_CONTEXT
     STDVGA_CURRENT_MODE CurrentMode;
 
     BOOLEAN DriverStarted;
-
-    UINT LastSubmittedFenceId;
-    UINT LastCompletedFenceId;
 } STDVGA_DEVICE_CONTEXT, *PSTDVGA_DEVICE_CONTEXT;
