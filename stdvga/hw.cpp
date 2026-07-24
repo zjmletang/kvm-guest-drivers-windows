@@ -359,7 +359,7 @@ _Use_decl_annotations_ VOID StdVgaHwGetCurrentMode(PSTDVGA_HW_CONTEXT HwContext,
 
     if (*pWidth == 0 || *pHeight == 0)
     {
-        *pWidth = 1920;
-        *pHeight = 1080;
+        *pWidth = STDVGA_DEFAULT_WIDTH;
+        *pHeight = STDVGA_DEFAULT_HEIGHT;
     }
 }

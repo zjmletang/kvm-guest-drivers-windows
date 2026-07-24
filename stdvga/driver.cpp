@@ -454,6 +454,6 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
         WPP_CLEANUP(pDriverObject);
         g_StdVgaDriverObject = NULL;
     }
-    
+
     return status;
 }
