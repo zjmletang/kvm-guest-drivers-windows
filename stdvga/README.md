@@ -6,7 +6,7 @@ Windows UEFI guests using the default Microsoft Basic Display Adapter are stuck 
 
 ## Features
 
-- Runtime resolution switching via Windows Display Settings or `Set-DisplayResolution`
+- Runtime resolution switching via Windows Display Settings, `Set-DisplayResolution`, or `stdvgares.exe`
 - 15 supported resolutions: 800x600, 1024x768, 1152x864, 1280x720, 1280x768, 1280x800, 1280x960, 1280x1024, 1400x1050, 1440x900, 1600x1200, 1680x1050, 1920x1080 (default), 1920x1200, 2560x1600
 - Single Universal x64 package covering Windows 10 (1709+) / 11 and Windows Server 2019 / 2022 / 2025
 
@@ -19,7 +19,13 @@ cd stdvga
 buildAll.bat
 ```
 
-Output is placed in `Install\Win10\amd64\` (`stdvga.sys` / `stdvga.inf` / `stdvga.cat`).
+You can also build directly with Visual Studio 2022 / MSBuild:
+
+```cmd
+msbuild stdvga.sln /p:Configuration="Win10 Release" /p:Platform=x64
+```
+
+Driver output is placed in `Install\Win10\amd64\` (`stdvga.sys` / `stdvga.inf` / `stdvga.cat`). The helper tool is built as `tools\stdvgares\objfre_win10_amd64\amd64\stdvgares.exe`.
 
 > The solution also exposes a `Win11 Release` configuration (`buildAll.bat Win11`), which produces a byte-identical Universal Driver in `Install\Win11\amd64\`. It is reserved for future Windows 11–only DDI work and is **not** required for normal builds or releases — a single package built from `Win10 Release` is the supported artifact.
 
@@ -43,22 +49,14 @@ Interactive (VNC / RDP):
 Set-DisplayResolution -Width 1920 -Height 1080 -Force
 ```
 
-> `Set-DisplayResolution` is only available on Windows Server. For client SKUs or unattended scenarios (SYSTEM session), use the registry method below:
+For automated or client-SKU scenarios, use the helper tool built with the solution:
 
-
-```powershell
-New-Item -Path 'HKLM:\System\CurrentControlSet\Services\StdVga\Parameters' -Force | Out-Null
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Services\StdVga\Parameters' -Name TargetWidth  -Value 1280 -Type DWord
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Services\StdVga\Parameters' -Name TargetHeight -Value 720  -Type DWord
-
-# Clear dxgkrnl mode cache
-Remove-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration' -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Connectivity' -Recurse -Force -ErrorAction SilentlyContinue
-
-# Restart the display device (no reboot needed)
-$dev = (Get-PnpDevice | Where-Object { ($_.HardwareID | Where-Object { $_ -like '*VEN_1234&DEV_1111*' }) }).InstanceId
-pnputil /restart-device "$dev"
+```cmd
+stdvgares.exe 1280 720
+stdvgares.exe 1920 1080
 ```
+
+The helper calls `ChangeDisplaySettingsExW` and returns zero for successful mode changes. It automatically targets the QEMU VGA display device, so it does not require a device argument when another virtual display adapter is present. If it is launched from session 0, it automatically starts itself in the active user session and applies the requested resolution there. It also prints the target display, current mode, requested mode, return code, and observed mode for automation logs.
 
 ## License
 
