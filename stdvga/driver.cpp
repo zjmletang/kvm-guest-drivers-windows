@@ -27,11 +27,13 @@
 
 #include "driver.h"
 #include "trace.h"
+#include "driver.tmh"
 
 // Some legacy WDDM wrapper functions remain in this file as dead code after
 // the conversion to KMDOD. Suppress "unreferenced function with internal
 // linkage has been removed" warnings.
 #pragma warning(disable : 4505)
+static PDRIVER_OBJECT g_StdVgaDriverObject = NULL;
 
 #pragma code_seg("PAGE")
 
@@ -88,7 +90,7 @@ static NTSTATUS StdVgaDdiStartDevice(_In_ PVOID pDeviceContext,
                                      _Out_ PULONG pNumberOfChildren)
 {
     PAGED_CODE();
-    TraceLog("DDI:StartDevice");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:StartDevice");
     return StdVgaStartDevice((PSTDVGA_DEVICE_CONTEXT)pDeviceContext,
                              pDxgkStartInfo,
                              pDxgkInterface,
@@ -99,7 +101,7 @@ static NTSTATUS StdVgaDdiStartDevice(_In_ PVOID pDeviceContext,
 static NTSTATUS StdVgaDdiStopDevice(_In_ PVOID pDeviceContext)
 {
     PAGED_CODE();
-    TraceLog("DDI:StopDevice");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:StopDevice");
     return StdVgaStopDevice((PSTDVGA_DEVICE_CONTEXT)pDeviceContext);
 }
 
@@ -117,7 +119,7 @@ static NTSTATUS StdVgaDdiDispatchIoRequest(_In_ PVOID pDeviceContext,
                                            _In_ PVIDEO_REQUEST_PACKET pVideoRequestPacket)
 {
     PAGED_CODE();
-    TraceLog("DDI:DispatchIoRequest");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:DispatchIoRequest");
     return StdVgaDispatchIoRequest((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, VidPnSourceId, pVideoRequestPacket);
 }
 
@@ -127,7 +129,7 @@ static NTSTATUS StdVgaDdiSetPowerState(_In_ PVOID pDeviceContext,
                                        _In_ POWER_ACTION ActionType)
 {
     PAGED_CODE();
-    TraceLog("DDI:SetPowerState");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:SetPowerState");
     return StdVgaSetPowerState((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, DeviceUid, DevicePowerState, ActionType);
 }
 
@@ -136,7 +138,7 @@ static NTSTATUS StdVgaDdiQueryChildRelations(_In_ PVOID pDeviceContext,
                                              _In_ ULONG ChildRelationsSize)
 {
     PAGED_CODE();
-    TraceLog("DDI:QueryChildRelations");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:QueryChildRelations");
     return StdVgaQueryChildRelations((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pChildRelations, ChildRelationsSize);
 }
 
@@ -145,7 +147,7 @@ static NTSTATUS StdVgaDdiQueryChildStatus(_In_ PVOID pDeviceContext,
                                           _In_ BOOLEAN NonDestructiveOnly)
 {
     PAGED_CODE();
-    TraceLog("DDI:QueryChildStatus");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:QueryChildStatus");
     return StdVgaQueryChildStatus((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pChildStatus, NonDestructiveOnly);
 }
 
@@ -154,7 +156,7 @@ static NTSTATUS StdVgaDdiQueryDeviceDescriptor(_In_ PVOID pDeviceContext,
                                                _Inout_ PDXGK_DEVICE_DESCRIPTOR pDeviceDescriptor)
 {
     PAGED_CODE();
-    TraceLog("DDI:QueryDeviceDescriptor");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:QueryDeviceDescriptor");
     return StdVgaQueryDeviceDescriptor((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, ChildUid, pDeviceDescriptor);
 }
 
@@ -162,7 +164,7 @@ static NTSTATUS StdVgaDdiQueryAdapterInfo(_In_ PVOID pDeviceContext,
                                           _In_ CONST DXGKARG_QUERYADAPTERINFO *pQueryAdapterInfo)
 {
     PAGED_CODE();
-    TraceLog("DDI:QueryAdapterInfo");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:QueryAdapterInfo");
     return StdVgaQueryAdapterInfo((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pQueryAdapterInfo);
 }
 
@@ -170,7 +172,7 @@ static NTSTATUS StdVgaDdiSetPointerPosition(_In_ PVOID pDeviceContext,
                                             _In_ CONST DXGKARG_SETPOINTERPOSITION *pSetPointerPosition)
 {
     PAGED_CODE();
-    TraceLog("DDI:SetPointerPosition");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:SetPointerPosition");
     return StdVgaSetPointerPosition((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pSetPointerPosition);
 }
 
@@ -178,14 +180,14 @@ static NTSTATUS StdVgaDdiSetPointerShape(_In_ PVOID pDeviceContext,
                                          _In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape)
 {
     PAGED_CODE();
-    TraceLog("DDI:SetPointerShape");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:SetPointerShape");
     return StdVgaSetPointerShape((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pSetPointerShape);
 }
 
 static NTSTATUS StdVgaDdiEscape(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_ESCAPE *pEscape)
 {
     PAGED_CODE();
-    TraceLog("DDI:Escape");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:Escape");
     return StdVgaEscape((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pEscape);
 }
 
@@ -193,7 +195,7 @@ static NTSTATUS StdVgaDdiIsSupportedVidPn(_In_ PVOID pDeviceContext,
                                           _Inout_ DXGKARG_ISSUPPORTEDVIDPN *pIsSupportedVidPn)
 {
     PAGED_CODE();
-    TraceLog("DDI:IsSupportedVidPn");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:IsSupportedVidPn");
     return StdVgaIsSupportedVidPn((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pIsSupportedVidPn);
 }
 
@@ -202,7 +204,7 @@ StdVgaDdiRecommendFunctionalVidPn(_In_ PVOID pDeviceContext,
                                   _In_ CONST DXGKARG_RECOMMENDFUNCTIONALVIDPN *pRecommendFunctionalVidPn)
 {
     PAGED_CODE();
-    TraceLog("DDI:RecommendFunctionalVidPn");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:RecommendFunctionalVidPn");
     return StdVgaRecommendFunctionalVidPn((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pRecommendFunctionalVidPn);
 }
 
@@ -210,7 +212,7 @@ static NTSTATUS StdVgaDdiRecommendMonitorModes(_In_ PVOID pDeviceContext,
                                                _In_ CONST DXGKARG_RECOMMENDMONITORMODES *pRecommendMonitorModes)
 {
     PAGED_CODE();
-    TraceLog("DDI:RecommendMonitorModes");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:RecommendMonitorModes");
     return StdVgaRecommendMonitorModes((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pRecommendMonitorModes);
 }
 
@@ -218,7 +220,7 @@ static NTSTATUS StdVgaDdiEnumVidPnCofuncModality(_In_ PVOID pDeviceContext,
                                                  _In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *pEnumCofuncModality)
 {
     PAGED_CODE();
-    TraceLog("DDI:EnumVidPnCofuncModality");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:EnumVidPnCofuncModality");
     return StdVgaEnumVidPnCofuncModality((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pEnumCofuncModality);
 }
 
@@ -227,14 +229,14 @@ StdVgaDdiSetVidPnSourceVisibility(_In_ PVOID pDeviceContext,
                                   _In_ CONST DXGKARG_SETVIDPNSOURCEVISIBILITY *pSetVidPnSourceVisibility)
 {
     PAGED_CODE();
-    TraceLog("DDI:SetVidPnSourceVisibility");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:SetVidPnSourceVisibility");
     return StdVgaSetVidPnSourceVisibility((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pSetVidPnSourceVisibility);
 }
 
 static NTSTATUS StdVgaDdiCommitVidPn(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_COMMITVIDPN *pCommitVidPn)
 {
     PAGED_CODE();
-    TraceLog("DDI:CommitVidPn");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:CommitVidPn");
     return StdVgaCommitVidPn((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pCommitVidPn);
 }
 
@@ -243,7 +245,7 @@ StdVgaDdiUpdateActiveVidPnPresentPath(_In_ PVOID pDeviceContext,
                                       _In_ CONST DXGKARG_UPDATEACTIVEVIDPNPRESENTPATH *pUpdateActiveVidPnPresentPath)
 {
     PAGED_CODE();
-    TraceLog("DDI:UpdateActiveVidPnPresentPath");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:UpdateActiveVidPnPresentPath");
     return StdVgaUpdateActiveVidPnPresentPath((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pUpdateActiveVidPnPresentPath);
 }
 
@@ -251,7 +253,7 @@ static NTSTATUS StdVgaDdiQueryVidPnHWCapability(_In_ PVOID pDeviceContext,
                                                 _Inout_ DXGKARG_QUERYVIDPNHWCAPABILITY *pVidPnHWCaps)
 {
     PAGED_CODE();
-    TraceLog("DDI:QueryVidPnHWCapability");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:QueryVidPnHWCapability");
     return StdVgaQueryVidPnHWCapability((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pVidPnHWCaps);
 }
 
@@ -260,7 +262,7 @@ static NTSTATUS StdVgaDdiStopDeviceAndReleasePostDisplayOwnership(_In_ PVOID pDe
                                                                   _Out_ DXGK_DISPLAY_INFORMATION *pDisplayInfo)
 {
     PAGED_CODE();
-    TraceLog("DDI:StopDeviceAndReleasePostDisplayOwnership");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:StopDeviceAndReleasePostDisplayOwnership");
     return StdVgaStopDeviceAndReleasePostDisplayOwnership((PSTDVGA_DEVICE_CONTEXT)pDeviceContext,
                                                           TargetId,
                                                           pDisplayInfo);
@@ -426,7 +428,7 @@ static NTSTATUS StdVgaDdiReleaseSwizzlingRange(_In_ PVOID pDeviceContext,
 
 static BOOLEAN StdVgaDdiInterruptRoutine(_In_ PVOID pDeviceContext, _In_ ULONG MessageNumber)
 {
-    TraceLog("DDI:InterruptRoutine");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:InterruptRoutine");
     return StdVgaInterruptRoutine((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, MessageNumber);
 }
 
@@ -442,7 +444,7 @@ static NTSTATUS StdVgaDdiSystemDisplayEnable(_In_ PVOID pDeviceContext,
                                              _Out_ PUINT pHeight,
                                              _Out_ D3DDDIFORMAT *pColorFormat)
 {
-    TraceLog("DDI:SystemDisplayEnable");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:SystemDisplayEnable");
     return StdVgaSystemDisplayEnable((PSTDVGA_DEVICE_CONTEXT)pDeviceContext,
                                      TargetId,
                                      Flags,
@@ -470,13 +472,18 @@ static VOID StdVgaDdiSystemDisplayWrite(_In_ PVOID pDeviceContext,
 
 static VOID StdVgaDdiUnload(VOID)
 {
-    TraceLog("DDI:Unload");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:Unload");
+    if (g_StdVgaDriverObject != NULL)
+    {
+        WPP_CLEANUP(g_StdVgaDriverObject);
+        g_StdVgaDriverObject = NULL;
+    }
 }
 
 static NTSTATUS StdVgaDdiQueryInterface(_In_ PVOID pDeviceContext, _In_ PQUERY_INTERFACE pQueryInterface)
 {
     UNREFERENCED_PARAMETER(pDeviceContext);
-    TraceLog("DDI:QueryInterface");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:QueryInterface");
     if (pQueryInterface != NULL && pQueryInterface->InterfaceType != NULL)
     {
         char buf[80];
@@ -495,7 +502,7 @@ static NTSTATUS StdVgaDdiQueryInterface(_In_ PVOID pDeviceContext, _In_ PQUERY_I
                             guid->Data4[5],
                             guid->Data4[6],
                             guid->Data4[7]);
-        TraceLog(buf);
+        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s", buf);
     }
     return STATUS_NOT_SUPPORTED;
 }
@@ -508,7 +515,7 @@ static NTSTATUS StdVgaDdiQueryInterface(_In_ PVOID pDeviceContext, _In_ PQUERY_I
 static NTSTATUS StdVgaDdiPresentDisplayOnly(_In_ PVOID pDeviceContext,
                                             _In_ CONST DXGKARG_PRESENT_DISPLAYONLY *pPresentDisplayOnly)
 {
-    TraceLog("DDI:PresentDisplayOnly");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:PresentDisplayOnly");
     return StdVgaPresentDisplayOnly((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pPresentDisplayOnly);
 }
 
@@ -522,7 +529,7 @@ static NTSTATUS StdVgaDdiNotifyAcpiEvent(_In_ PVOID pDeviceContext,
     UNREFERENCED_PARAMETER(EventType);
     UNREFERENCED_PARAMETER(Event);
     UNREFERENCED_PARAMETER(Argument);
-    TraceLog("DDI:NotifyAcpiEvent");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:NotifyAcpiEvent");
     if (pAcpiFlags)
     {
         *pAcpiFlags = 0;
@@ -541,7 +548,7 @@ static NTSTATUS StdVgaDdiSetPalette(_In_ PVOID pDeviceContext, _In_ CONST DXGKAR
 {
     UNREFERENCED_PARAMETER(pDeviceContext);
     UNREFERENCED_PARAMETER(pSetPalette);
-    TraceLog("DDI:SetPalette");
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:SetPalette");
     return STATUS_SUCCESS;
 }
 
@@ -553,6 +560,9 @@ static NTSTATUS StdVgaDdiSetPalette(_In_ PVOID pDeviceContext, _In_ CONST DXGKAR
 extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_STRING *pRegistryPath)
 {
     KMDDOD_INITIALIZATION_DATA InitData = {};
+
+    WPP_INIT_TRACING(pDriverObject, pRegistryPath);
+    g_StdVgaDriverObject = pDriverObject;
 
     InitData.Version = DXGKDDI_INTERFACE_VERSION_WDDM1_3;
 
@@ -601,6 +611,11 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     InitData.DxgkDdiSystemDisplayWrite = StdVgaDdiSystemDisplayWrite;
 
     NTSTATUS status = DxgkInitializeDisplayOnlyDriver(pDriverObject, pRegistryPath, &InitData);
-
+    if (!NT_SUCCESS(status))
+    {
+        WPP_CLEANUP(pDriverObject);
+        g_StdVgaDriverObject = NULL;
+    }
+    
     return status;
 }
