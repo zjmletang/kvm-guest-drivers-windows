@@ -702,24 +702,30 @@ _Use_decl_annotations_ NTSTATUS StdVgaSetPointerShape(PSTDVGA_DEVICE_CONTEXT Dev
     return STATUS_NOT_SUPPORTED;
 }
 
+// Magic header for the StdVgaEscape debug protocol below: the ASCII bytes
+// 'S','V','G','A' packed into a little-endian ULONG (byte 0 = 'S').
+#define STDVGA_ESCAPE_MAGIC 0x41475653UL
+
 _Use_decl_annotations_ NTSTATUS StdVgaEscape(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ESCAPE *pEscape)
 {
     PAGED_CODE();
 
-    // Custom escape protocol for runtime resolution change without reboot.
-    //   Magic header  ULONG = 0x53565641 ('SVGA'/AVGS little-endian)
+    // Debug-only escape protocol for runtime resolution change without a
+    // VidPn re-negotiation. Not used by stdvgares.exe (which goes through
+    // ChangeDisplaySettingsExW / normal VidPn commit); kept for low-level
+    // driver debugging via D3DKMTEscape with PrivateDriverData laid out as:
+    //   ULONG STDVGA_ESCAPE_MAGIC
     //   ULONG width
     //   ULONG height
-    // From user mode, call D3DKMTEscape with PrivateDriverData pointing to
-    // this struct. If accepted, driver immediately calls HwSetMode and redraws
-    // splash so VNC reflects the new resolution.
+    // On success the driver immediately calls HwSetMode and paints a color-bar
+    // test pattern so the new resolution is visually confirmable.
     if (pEscape == NULL || pEscape->pPrivateDriverData == NULL || pEscape->PrivateDriverDataSize < sizeof(ULONG) * 3)
     {
         return STATUS_INVALID_PARAMETER;
     }
 
     PULONG pData = (PULONG)pEscape->pPrivateDriverData;
-    if (pData[0] != 0x41475653UL) // 'SVGA' as 4 little-endian bytes
+    if (pData[0] != STDVGA_ESCAPE_MAGIC)
     {
         return STATUS_INVALID_DEVICE_REQUEST;
     }
@@ -764,6 +770,14 @@ _Use_decl_annotations_ NTSTATUS StdVgaEscape(PSTDVGA_DEVICE_CONTEXT DevCtx, CONS
     DevCtx->CurrentMode.DispInfo.Height = newH;
     DevCtx->CurrentMode.DispInfo.Pitch = stride;
 
+    return STATUS_SUCCESS;
+}
+
+_Use_decl_annotations_ NTSTATUS StdVgaCollectDbgInfo(PSTDVGA_DEVICE_CONTEXT DevCtx,
+                                                     CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo)
+{
+    UNREFERENCED_PARAMETER(DevCtx);
+    UNREFERENCED_PARAMETER(pCollectDbgInfo);
     return STATUS_SUCCESS;
 }
 
@@ -869,12 +883,6 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
 {
     PAGED_CODE();
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "IsSupportedVidPn ENTER");
-
-    // Track whether we've already reported "not supported" to bound the
-    // back-and-forth and let dxgkrnl progress. Strategy: first ~3 calls with
-    // empty desired VidPn return FALSE to force dxgkrnl to call
-    // RecommendFunctionalVidPn. After that, return TRUE so dxgkrnl can commit.
-    static LONG s_notSupportedCount = 0;
 
     if (pIsSupportedVidPn->hDesiredVidPn == 0)
     {
@@ -985,29 +993,11 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
     }
 
     // Decision logic.
-    // The empty desired VidPn (no pinned src/tgt, empty target mode set) is
-    // dxgkrnl's invitation to mode-set negotiation. Our EnumCofuncModality
-    // pfnAddMode always fails with INVALID_FREQUENCY, so this VidPn will never
-    // commit. Instead, return FALSE the first ~3 times to force dxgkrnl to
-    // call DxgkDdiRecommendFunctionalVidPn, where we directly build a pinned
-    // VidPn (different validation path, potentially looser).
-    SIZE_T finalTgtCount = 0;
-    D3DKMDT_HVIDPNTARGETMODESET hTgtFinal = 0;
-    const DXGK_VIDPNTARGETMODESET_INTERFACE *pTgtIfaceFinal = NULL;
-    if (NT_SUCCESS(pVidPnInterface->pfnAcquireTargetModeSet(pIsSupportedVidPn->hDesiredVidPn,
-                                                            0,
-                                                            &hTgtFinal,
-                                                            &pTgtIfaceFinal)))
-    {
-        pTgtIfaceFinal->pfnGetNumModes(hTgtFinal, &finalTgtCount);
-        pVidPnInterface->pfnReleaseTargetModeSet(pIsSupportedVidPn->hDesiredVidPn, hTgtFinal);
-    }
-
-    // NOT_SUP didn't trigger RecommendFunctionalVidPn (dxgkrnl just
-    // gives up). Revert to always-TRUE so EnumCofuncModality runs.
-    UNREFERENCED_PARAMETER(s_notSupportedCount);
-    UNREFERENCED_PARAMETER(finalTgtCount);
-
+    // Source/target mode checks above only reject VidPns whose pinned mode
+    // exceeds the hardware's supported resolution/VRAM limits. Any other
+    // desired VidPn (including the empty one dxgkrnl sends as an invitation
+    // to mode-set negotiation) is accepted so DxgkDdiEnumVidPnCofuncModality
+    // and DxgkDdiCommitVidPn get a chance to run.
     pIsSupportedVidPn->IsVidPnSupported = TRUE;
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "  IsSup OK");
     return STATUS_SUCCESS;
@@ -1840,355 +1830,4 @@ _Use_decl_annotations_ VOID StdVgaDpcRoutine(PSTDVGA_DEVICE_CONTEXT DevCtx)
     UNREFERENCED_PARAMETER(DevCtx);
 }
 
-//
-// ---- Full WDDM Miniport DDIs ----
-//
 
-#pragma code_seg("PAGE")
-
-_Use_decl_annotations_ NTSTATUS StdVgaCreateDevice(PSTDVGA_DEVICE_CONTEXT DevCtx, DXGKARG_CREATEDEVICE *pCreateDevice)
-{
-    PAGED_CODE();
-
-    PSTDVGA_DEVICE pDevice = (PSTDVGA_DEVICE)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(STDVGA_DEVICE), STDVGA_TAG);
-    if (pDevice == NULL)
-    {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    RtlZeroMemory(pDevice, sizeof(STDVGA_DEVICE));
-
-    pDevice->pAdapter = DevCtx;
-    pDevice->hDevice = pCreateDevice->hDevice;
-    pCreateDevice->pInfo = NULL;
-
-    pCreateDevice->hDevice = (HANDLE)pDevice;
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaDestroyDevice(PVOID pDeviceContext)
-{
-    PAGED_CODE();
-    if (pDeviceContext != NULL)
-    {
-        ExFreePoolWithTag(pDeviceContext, STDVGA_TAG);
-    }
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaCreateAllocation(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                       DXGKARG_CREATEALLOCATION *pCreateAllocation)
-{
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(DevCtx);
-
-    for (UINT i = 0; i < pCreateAllocation->NumAllocations; i++)
-    {
-        DXGK_ALLOCATIONINFO *pAllocInfo = &pCreateAllocation->pAllocationInfo[i];
-
-        PSTDVGA_ALLOCATION pAlloc = (PSTDVGA_ALLOCATION)ExAllocatePoolWithTag(NonPagedPoolNx,
-                                                                              sizeof(STDVGA_ALLOCATION),
-                                                                              STDVGA_TAG);
-        if (pAlloc == NULL)
-        {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        RtlZeroMemory(pAlloc, sizeof(STDVGA_ALLOCATION));
-
-        if (pAllocInfo->pPrivateDriverData != NULL && pAllocInfo->PrivateDriverDataSize >= sizeof(STDVGA_ALLOCATION))
-        {
-            RtlCopyMemory(pAlloc, pAllocInfo->pPrivateDriverData, sizeof(STDVGA_ALLOCATION));
-        }
-        else
-        {
-            pAlloc->Width = 1920;
-            pAlloc->Height = 1080;
-            pAlloc->Pitch = 1920 * 4;
-            pAlloc->BytesPerPixel = 4;
-            pAlloc->Format = D3DDDIFMT_X8R8G8B8;
-        }
-
-        pAllocInfo->hAllocation = (HANDLE)pAlloc;
-        pAllocInfo->Alignment = 0;
-        pAllocInfo->Size = (SIZE_T)pAlloc->Pitch * pAlloc->Height;
-        pAllocInfo->PitchAlignedSize = 0;
-        pAllocInfo->AllocationPriority = D3DDDI_ALLOCATIONPRIORITY_NORMAL;
-        pAllocInfo->SupportedReadSegmentSet = 1;
-        pAllocInfo->SupportedWriteSegmentSet = 1;
-        pAllocInfo->PreferredSegment.Value = 0;
-        pAllocInfo->PreferredSegment.SegmentId0 = 1;
-        pAllocInfo->Flags.Value = 0;
-        pAllocInfo->Flags.CpuVisible = 1;
-        pAllocInfo->EvictionSegmentSet = 0;
-        pAllocInfo->MaximumRenamingListLength = 0;
-        pAllocInfo->pAllocationUsageHint = NULL;
-    }
-
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaDestroyAllocation(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                        CONST DXGKARG_DESTROYALLOCATION *pDestroyAllocation)
-{
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(DevCtx);
-
-    for (UINT i = 0; i < pDestroyAllocation->NumAllocations; i++)
-    {
-        PSTDVGA_ALLOCATION pAlloc = (PSTDVGA_ALLOCATION)pDestroyAllocation->pAllocationList[i];
-        if (pAlloc != NULL)
-        {
-            ExFreePoolWithTag(pAlloc, STDVGA_TAG);
-        }
-    }
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaDescribeAllocation(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                         DXGKARG_DESCRIBEALLOCATION *pDescribeAllocation)
-{
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(DevCtx);
-
-    PSTDVGA_ALLOCATION pAlloc = (PSTDVGA_ALLOCATION)pDescribeAllocation->hAllocation;
-    if (pAlloc == NULL)
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    pDescribeAllocation->Width = pAlloc->Width;
-    pDescribeAllocation->Height = pAlloc->Height;
-    pDescribeAllocation->Format = pAlloc->Format;
-    pDescribeAllocation->MultisampleMethod.NumSamples = 1;
-    pDescribeAllocation->MultisampleMethod.NumQualityLevels = 0;
-    pDescribeAllocation->RefreshRate.Numerator = 60;
-    pDescribeAllocation->RefreshRate.Denominator = 1;
-
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS
-StdVgaGetStandardAllocationDriverData(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                      DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStdAllocData)
-{
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(DevCtx);
-
-    switch (pStdAllocData->StandardAllocationType)
-    {
-        case D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE:
-            {
-                auto *pPrimary = pStdAllocData->pCreateSharedPrimarySurfaceData;
-                if (pStdAllocData->pAllocationPrivateDriverData == NULL)
-                {
-                    pStdAllocData->AllocationPrivateDriverDataSize = sizeof(STDVGA_ALLOCATION);
-                    pStdAllocData->ResourcePrivateDriverDataSize = 0;
-                    return STATUS_SUCCESS;
-                }
-
-                PSTDVGA_ALLOCATION pAlloc = (PSTDVGA_ALLOCATION)pStdAllocData->pAllocationPrivateDriverData;
-                RtlZeroMemory(pAlloc, sizeof(STDVGA_ALLOCATION));
-                pAlloc->Width = pPrimary->Width;
-                pAlloc->Height = pPrimary->Height;
-                pAlloc->BytesPerPixel = 4;
-                pAlloc->Pitch = pPrimary->Width * 4;
-                pAlloc->Format = pPrimary->Format;
-                pAlloc->IsPrimary = TRUE;
-                return STATUS_SUCCESS;
-            }
-
-        case D3DKMDT_STANDARDALLOCATION_SHADOWSURFACE:
-            {
-                auto *pShadow = pStdAllocData->pCreateShadowSurfaceData;
-                if (pStdAllocData->pAllocationPrivateDriverData == NULL)
-                {
-                    pStdAllocData->AllocationPrivateDriverDataSize = sizeof(STDVGA_ALLOCATION);
-                    pStdAllocData->ResourcePrivateDriverDataSize = 0;
-                    return STATUS_SUCCESS;
-                }
-
-                PSTDVGA_ALLOCATION pAlloc = (PSTDVGA_ALLOCATION)pStdAllocData->pAllocationPrivateDriverData;
-                RtlZeroMemory(pAlloc, sizeof(STDVGA_ALLOCATION));
-                pAlloc->Width = pShadow->Width;
-                pAlloc->Height = pShadow->Height;
-                pAlloc->BytesPerPixel = 4;
-                pAlloc->Pitch = pShadow->Width * 4;
-                pAlloc->Format = pShadow->Format;
-                pShadow->Pitch = pAlloc->Pitch;
-                return STATUS_SUCCESS;
-            }
-
-        case D3DKMDT_STANDARDALLOCATION_STAGINGSURFACE:
-            {
-                auto *pStaging = pStdAllocData->pCreateStagingSurfaceData;
-                if (pStdAllocData->pAllocationPrivateDriverData == NULL)
-                {
-                    pStdAllocData->AllocationPrivateDriverDataSize = sizeof(STDVGA_ALLOCATION);
-                    pStdAllocData->ResourcePrivateDriverDataSize = 0;
-                    return STATUS_SUCCESS;
-                }
-
-                PSTDVGA_ALLOCATION pAlloc = (PSTDVGA_ALLOCATION)pStdAllocData->pAllocationPrivateDriverData;
-                RtlZeroMemory(pAlloc, sizeof(STDVGA_ALLOCATION));
-                pAlloc->Width = pStaging->Width;
-                pAlloc->Height = pStaging->Height;
-                pAlloc->BytesPerPixel = 4;
-                pAlloc->Pitch = pStaging->Width * 4;
-                pAlloc->Format = D3DDDIFMT_X8R8G8B8;
-                pStaging->Pitch = pAlloc->Pitch;
-                return STATUS_SUCCESS;
-            }
-
-        default:
-            return STATUS_NOT_SUPPORTED;
-    }
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaOpenAllocation(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                     CONST DXGKARG_OPENALLOCATION *pOpenAllocation)
-{
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(DevCtx);
-    UNREFERENCED_PARAMETER(pOpenAllocation);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaCloseAllocation(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                      CONST DXGKARG_CLOSEALLOCATION *pCloseAllocation)
-{
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(DevCtx);
-    UNREFERENCED_PARAMETER(pCloseAllocation);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaBuildPagingBuffer(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                        DXGKARG_BUILDPAGINGBUFFER *pBuildPagingBuffer)
-{
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(DevCtx);
-
-    switch (pBuildPagingBuffer->Operation)
-    {
-        case DXGK_OPERATION_TRANSFER:
-        case DXGK_OPERATION_FILL:
-        case DXGK_OPERATION_DISCARD_CONTENT:
-        case DXGK_OPERATION_MAP_APERTURE_SEGMENT:
-        case DXGK_OPERATION_UNMAP_APERTURE_SEGMENT:
-        case DXGK_OPERATION_SPECIAL_LOCK_TRANSFER:
-            break;
-        default:
-            break;
-    }
-
-    return STATUS_SUCCESS;
-}
-
-#pragma code_seg()
-
-_Use_decl_annotations_ NTSTATUS StdVgaSubmitCommand(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                    CONST DXGKARG_SUBMITCOMMAND *pSubmitCommand)
-{
-    DevCtx->LastSubmittedFenceId = pSubmitCommand->SubmissionFenceId;
-    InterlockedExchange((LONG *)&DevCtx->LastCompletedFenceId, (LONG)pSubmitCommand->SubmissionFenceId);
-
-    DXGKARGCB_NOTIFY_INTERRUPT_DATA notifyData = {};
-    notifyData.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
-    notifyData.DmaCompleted.SubmissionFenceId = pSubmitCommand->SubmissionFenceId;
-    notifyData.DmaCompleted.NodeOrdinal = pSubmitCommand->NodeOrdinal;
-    notifyData.DmaCompleted.EngineOrdinal = pSubmitCommand->EngineOrdinal;
-
-    DevCtx->DxgkInterface.DxgkCbNotifyInterrupt(DevCtx->DxgkInterface.DeviceHandle, &notifyData);
-    DevCtx->DxgkInterface.DxgkCbQueueDpc(DevCtx->DxgkInterface.DeviceHandle);
-
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaPatch(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_PATCH *pPatch)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-    UNREFERENCED_PARAMETER(pPatch);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaPreemptCommand(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                     CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-    UNREFERENCED_PARAMETER(pPreemptCommand);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaQueryCurrentFence(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                        DXGKARG_QUERYCURRENTFENCE *pQueryCurrentFence)
-{
-    pQueryCurrentFence->CurrentFence = DevCtx->LastCompletedFenceId;
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaPresent(PSTDVGA_DEVICE_CONTEXT DevCtx, DXGKARG_PRESENT *pPresent)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-
-    // Generate empty DMA buffer - rendering is handled by the display pipeline.
-    pPresent->pDmaBufferPrivateData = (PUCHAR)pPresent->pDmaBufferPrivateData;
-    pPresent->MultipassOffset = 0;
-
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaRender(PSTDVGA_DEVICE_CONTEXT DevCtx, DXGKARG_RENDER *pRender)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-
-    // No rendering capability - just advance the DMA buffer pointer.
-    pRender->pDmaBuffer = pRender->pDmaBuffer;
-    pRender->pDmaBufferPrivateData = pRender->pDmaBufferPrivateData;
-    pRender->MultipassOffset = 0;
-
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaSetVidPnSourceAddress(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                            CONST DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-    UNREFERENCED_PARAMETER(pSetVidPnSourceAddress);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaResetFromTimeout(PSTDVGA_DEVICE_CONTEXT DevCtx)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaRestartFromTimeout(PSTDVGA_DEVICE_CONTEXT DevCtx)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaCollectDbgInfo(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                     CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-    UNREFERENCED_PARAMETER(pCollectDbgInfo);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaAcquireSwizzlingRange(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                            DXGKARG_ACQUIRESWIZZLINGRANGE *pAcquireSwizzlingRange)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-    UNREFERENCED_PARAMETER(pAcquireSwizzlingRange);
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_ NTSTATUS StdVgaReleaseSwizzlingRange(PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                                            CONST DXGKARG_RELEASESWIZZLINGRANGE *pReleaseSwizzlingRange)
-{
-    UNREFERENCED_PARAMETER(DevCtx);
-    UNREFERENCED_PARAMETER(pReleaseSwizzlingRange);
-    return STATUS_SUCCESS;
-}

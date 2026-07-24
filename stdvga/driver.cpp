@@ -29,10 +29,6 @@
 #include "trace.h"
 #include "driver.tmh"
 
-// Some legacy WDDM wrapper functions remain in this file as dead code after
-// the conversion to KMDOD. Suppress "unreferenced function with internal
-// linkage has been removed" warnings.
-#pragma warning(disable : 4505)
 static PDRIVER_OBJECT g_StdVgaDriverObject = NULL;
 
 #pragma code_seg("PAGE")
@@ -182,6 +178,13 @@ static NTSTATUS StdVgaDdiEscape(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_ES
     return StdVgaEscape((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pEscape);
 }
 
+static NTSTATUS StdVgaDdiCollectDbgInfo(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo)
+{
+    PAGED_CODE();
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "DDI:CollectDbgInfo");
+    return StdVgaCollectDbgInfo((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pCollectDbgInfo);
+}
+
 static NTSTATUS StdVgaDdiIsSupportedVidPn(_In_ PVOID pDeviceContext,
                                           _Inout_ DXGKARG_ISSUPPORTEDVIDPN *pIsSupportedVidPn)
 {
@@ -257,162 +260,6 @@ static NTSTATUS StdVgaDdiStopDeviceAndReleasePostDisplayOwnership(_In_ PVOID pDe
     return StdVgaStopDeviceAndReleasePostDisplayOwnership((PSTDVGA_DEVICE_CONTEXT)pDeviceContext,
                                                           TargetId,
                                                           pDisplayInfo);
-}
-
-//
-// Full WDDM miniport DDI wrappers
-//
-
-static NTSTATUS StdVgaDdiCreateDevice(_In_ PVOID pDeviceContext, _Inout_ DXGKARG_CREATEDEVICE *pCreateDevice)
-{
-    PAGED_CODE();
-    TraceLog("DDI:CreateDevice");
-    return StdVgaCreateDevice((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pCreateDevice);
-}
-
-static NTSTATUS StdVgaDdiDestroyDevice(_In_ PVOID pDeviceContext)
-{
-    PAGED_CODE();
-    TraceLog("DDI:DestroyDevice");
-    return StdVgaDestroyDevice(pDeviceContext);
-}
-
-static NTSTATUS StdVgaDdiCreateAllocation(_In_ PVOID pDeviceContext,
-                                          _Inout_ DXGKARG_CREATEALLOCATION *pCreateAllocation)
-{
-    PAGED_CODE();
-    TraceLog("DDI:CreateAllocation");
-    return StdVgaCreateAllocation((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pCreateAllocation);
-}
-
-static NTSTATUS StdVgaDdiDestroyAllocation(_In_ PVOID pDeviceContext,
-                                           _In_ CONST DXGKARG_DESTROYALLOCATION *pDestroyAllocation)
-{
-    PAGED_CODE();
-    TraceLog("DDI:DestroyAllocation");
-    return StdVgaDestroyAllocation((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pDestroyAllocation);
-}
-
-static NTSTATUS StdVgaDdiDescribeAllocation(_In_ PVOID pDeviceContext,
-                                            _Inout_ DXGKARG_DESCRIBEALLOCATION *pDescribeAllocation)
-{
-    PAGED_CODE();
-    TraceLog("DDI:DescribeAllocation");
-    return StdVgaDescribeAllocation((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pDescribeAllocation);
-}
-
-static NTSTATUS StdVgaDdiGetStandardAllocationDriverData(_In_ PVOID pDeviceContext,
-                                                         _Inout_ DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStdAllocData)
-{
-    PAGED_CODE();
-    TraceLog("DDI:GetStandardAllocationDriverData");
-    return StdVgaGetStandardAllocationDriverData((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pStdAllocData);
-}
-
-static NTSTATUS StdVgaDdiOpenAllocation(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_OPENALLOCATION *pOpenAllocation)
-{
-    PAGED_CODE();
-    TraceLog("DDI:OpenAllocation");
-    return StdVgaOpenAllocation((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pOpenAllocation);
-}
-
-static NTSTATUS StdVgaDdiCloseAllocation(_In_ PVOID pDeviceContext,
-                                         _In_ CONST DXGKARG_CLOSEALLOCATION *pCloseAllocation)
-{
-    PAGED_CODE();
-    TraceLog("DDI:CloseAllocation");
-    return StdVgaCloseAllocation((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pCloseAllocation);
-}
-
-static NTSTATUS StdVgaDdiBuildPagingBuffer(_In_ PVOID pDeviceContext,
-                                           _Inout_ DXGKARG_BUILDPAGINGBUFFER *pBuildPagingBuffer)
-{
-    PAGED_CODE();
-    TraceLog("DDI:BuildPagingBuffer");
-    return StdVgaBuildPagingBuffer((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pBuildPagingBuffer);
-}
-
-static NTSTATUS StdVgaDdiSubmitCommand(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_SUBMITCOMMAND *pSubmitCommand)
-{
-    TraceLog("DDI:SubmitCommand");
-    return StdVgaSubmitCommand((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pSubmitCommand);
-}
-
-static NTSTATUS StdVgaDdiPatch(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_PATCH *pPatch)
-{
-    TraceLog("DDI:Patch");
-    return StdVgaPatch((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pPatch);
-}
-
-static NTSTATUS StdVgaDdiPreemptCommand(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand)
-{
-    TraceLog("DDI:PreemptCommand");
-    return StdVgaPreemptCommand((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pPreemptCommand);
-}
-
-static NTSTATUS StdVgaDdiQueryCurrentFence(_In_ PVOID pDeviceContext,
-                                           _Inout_ DXGKARG_QUERYCURRENTFENCE *pQueryCurrentFence)
-{
-    TraceLog("DDI:QueryCurrentFence");
-    return StdVgaQueryCurrentFence((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pQueryCurrentFence);
-}
-
-static NTSTATUS StdVgaDdiPresent(_In_ PVOID pDeviceContext, _Inout_ DXGKARG_PRESENT *pPresent)
-{
-    TraceLog("DDI:Present");
-    return StdVgaPresent((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pPresent);
-}
-
-static NTSTATUS StdVgaDdiRender(_In_ PVOID pDeviceContext, _Inout_ DXGKARG_RENDER *pRender)
-{
-    UNREFERENCED_PARAMETER(pDeviceContext);
-    UNREFERENCED_PARAMETER(pRender);
-    return STATUS_NOT_SUPPORTED;
-}
-
-static NTSTATUS StdVgaDdiRenderKm(_In_ PVOID pDeviceContext, _Inout_ DXGKARG_RENDER *pRender)
-{
-    TraceLog("DDI:Render");
-    return StdVgaRender((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pRender);
-}
-
-static NTSTATUS StdVgaDdiSetVidPnSourceAddress(_In_ PVOID pDeviceContext,
-                                               _In_ CONST DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress)
-{
-    TraceLog("DDI:SetVidPnSourceAddress");
-    return StdVgaSetVidPnSourceAddress((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pSetVidPnSourceAddress);
-}
-
-static NTSTATUS StdVgaDdiResetFromTimeout(_In_ PVOID pDeviceContext)
-{
-    TraceLog("DDI:ResetFromTimeout");
-    return StdVgaResetFromTimeout((PSTDVGA_DEVICE_CONTEXT)pDeviceContext);
-}
-
-static NTSTATUS StdVgaDdiRestartFromTimeout(_In_ PVOID pDeviceContext)
-{
-    TraceLog("DDI:RestartFromTimeout");
-    return StdVgaRestartFromTimeout((PSTDVGA_DEVICE_CONTEXT)pDeviceContext);
-}
-
-static NTSTATUS StdVgaDdiCollectDbgInfo(_In_ PVOID pDeviceContext, _In_ CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo)
-{
-    TraceLog("DDI:CollectDbgInfo");
-    return StdVgaCollectDbgInfo((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pCollectDbgInfo);
-}
-
-static NTSTATUS StdVgaDdiAcquireSwizzlingRange(_In_ PVOID pDeviceContext,
-                                               _Inout_ DXGKARG_ACQUIRESWIZZLINGRANGE *pAcquireSwizzlingRange)
-{
-    TraceLog("DDI:AcquireSwizzlingRange");
-    return StdVgaAcquireSwizzlingRange((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pAcquireSwizzlingRange);
-}
-
-static NTSTATUS StdVgaDdiReleaseSwizzlingRange(_In_ PVOID pDeviceContext,
-                                               _In_ CONST DXGKARG_RELEASESWIZZLINGRANGE *pReleaseSwizzlingRange)
-{
-    TraceLog("DDI:ReleaseSwizzlingRange");
-    return StdVgaReleaseSwizzlingRange((PSTDVGA_DEVICE_CONTEXT)pDeviceContext, pReleaseSwizzlingRange);
 }
 
 #pragma code_seg()

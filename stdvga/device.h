@@ -86,6 +86,9 @@ NTSTATUS
 StdVgaEscape(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_ESCAPE *pEscape);
 
 NTSTATUS
+StdVgaCollectDbgInfo(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo);
+
+NTSTATUS
 StdVgaPresentDisplayOnly(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx,
                          _In_ CONST DXGKARG_PRESENT_DISPLAYONLY *pPresentDisplayOnly);
 
@@ -143,74 +146,3 @@ BOOLEAN
 StdVgaInterruptRoutine(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ ULONG MessageNumber);
 
 VOID StdVgaDpcRoutine(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx);
-
-//
-// Full WDDM miniport DDIs (memory management, scheduling, rendering).
-//
-
-NTSTATUS
-StdVgaCreateDevice(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _Inout_ DXGKARG_CREATEDEVICE *pCreateDevice);
-
-NTSTATUS
-StdVgaDestroyDevice(_In_ PVOID pDeviceContext);
-
-NTSTATUS
-StdVgaCreateAllocation(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _Inout_ DXGKARG_CREATEALLOCATION *pCreateAllocation);
-
-NTSTATUS
-StdVgaDestroyAllocation(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_DESTROYALLOCATION *pDestroyAllocation);
-
-NTSTATUS
-StdVgaDescribeAllocation(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _Inout_ DXGKARG_DESCRIBEALLOCATION *pDescribeAllocation);
-
-NTSTATUS
-StdVgaGetStandardAllocationDriverData(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx,
-                                      _Inout_ DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStdAllocData);
-
-NTSTATUS
-StdVgaOpenAllocation(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_OPENALLOCATION *pOpenAllocation);
-
-NTSTATUS
-StdVgaCloseAllocation(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_CLOSEALLOCATION *pCloseAllocation);
-
-NTSTATUS
-StdVgaBuildPagingBuffer(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _Inout_ DXGKARG_BUILDPAGINGBUFFER *pBuildPagingBuffer);
-
-NTSTATUS
-StdVgaSubmitCommand(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_SUBMITCOMMAND *pSubmitCommand);
-
-NTSTATUS
-StdVgaPatch(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_PATCH *pPatch);
-
-NTSTATUS
-StdVgaPreemptCommand(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand);
-
-NTSTATUS
-StdVgaQueryCurrentFence(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _Inout_ DXGKARG_QUERYCURRENTFENCE *pQueryCurrentFence);
-
-NTSTATUS
-StdVgaPresent(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _Inout_ DXGKARG_PRESENT *pPresent);
-
-NTSTATUS
-StdVgaRender(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _Inout_ DXGKARG_RENDER *pRender);
-
-NTSTATUS
-StdVgaSetVidPnSourceAddress(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx,
-                            _In_ CONST DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress);
-
-NTSTATUS
-StdVgaResetFromTimeout(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx);
-
-NTSTATUS
-StdVgaRestartFromTimeout(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx);
-
-NTSTATUS
-StdVgaCollectDbgInfo(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo);
-
-NTSTATUS
-StdVgaAcquireSwizzlingRange(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx,
-                            _Inout_ DXGKARG_ACQUIRESWIZZLINGRANGE *pAcquireSwizzlingRange);
-
-NTSTATUS
-StdVgaReleaseSwizzlingRange(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx,
-                            _In_ CONST DXGKARG_RELEASESWIZZLINGRANGE *pReleaseSwizzlingRange);
