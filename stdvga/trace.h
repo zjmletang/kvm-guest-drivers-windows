@@ -28,67 +28,22 @@
 #pragma once
 
 //
-// Shared debug tracing utilities for the stdvga driver.
-// In DBG builds, appends trace messages to \SystemRoot\stdvga_trace.log.
-// In release builds, all functions compile to no-ops.
+// WPP/ETW tracing utilities for the stdvga driver.
 //
 
-static __inline VOID TraceLog(_In_ const char *msg)
-{
-#if DBG
-    UNICODE_STRING fileName;
-    RtlInitUnicodeString(&fileName, L"\\SystemRoot\\stdvga_trace.log");
+#define WPP_CONTROL_GUIDS                                                                                              \
+    WPP_DEFINE_CONTROL_GUID(StdVgaTraceGuid,                                                                           \
+                            (1BC93793, 694F, 48FE, 9372, 81E2B05556FD),                                                \
+                            WPP_DEFINE_BIT(DBG_ALL))
 
-    OBJECT_ATTRIBUTES oa;
-    InitializeObjectAttributes(&oa, &fileName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+#define WPP_FLAG_LEVEL_LOGGER(flag, level)  WPP_LEVEL_LOGGER(flag)
+#define WPP_FLAG_LEVEL_ENABLED(flag, level) (WPP_LEVEL_ENABLED(flag) && WPP_CONTROL(WPP_BIT_##flag).Level >= level)
 
-    IO_STATUS_BLOCK iosb;
-    HANDLE hFile = NULL;
-    NTSTATUS st = ZwCreateFile(&hFile,
-                               FILE_APPEND_DATA | SYNCHRONIZE,
-                               &oa,
-                               &iosb,
-                               NULL,
-                               FILE_ATTRIBUTE_NORMAL,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               FILE_OPEN_IF,
-                               FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
-                               NULL,
-                               0);
+#define WPP_LEVEL_FLAGS_LOGGER(level, flags)  WPP_LEVEL_LOGGER(flags)
+#define WPP_LEVEL_FLAGS_ENABLED(level, flags) (WPP_LEVEL_ENABLED(flags) && WPP_CONTROL(WPP_BIT_##flags).Level >= level)
 
-    if (NT_SUCCESS(st))
-    {
-        SIZE_T len = strlen(msg);
-        ZwWriteFile(hFile, NULL, NULL, NULL, &iosb, (PVOID)msg, (ULONG)len, NULL, NULL);
-        char nl = '\n';
-        ZwWriteFile(hFile, NULL, NULL, NULL, &iosb, &nl, 1, NULL, NULL);
-        ZwClose(hFile);
-    }
-#else
-    UNREFERENCED_PARAMETER(msg);
-#endif
-}
-
-static __inline VOID TraceLogStatus(_In_ const char *prefix, _In_ NTSTATUS status)
-{
-#if DBG
-    char buf[128];
-    RtlStringCchPrintfA(buf, sizeof(buf), "%s 0x%08X", prefix, (ULONG)status);
-    TraceLog(buf);
-#else
-    UNREFERENCED_PARAMETER(prefix);
-    UNREFERENCED_PARAMETER(status);
-#endif
-}
-
-static __inline VOID TraceLogInt(_In_ const char *prefix, _In_ int value)
-{
-#if DBG
-    char buf[128];
-    RtlStringCchPrintfA(buf, sizeof(buf), "%s=0x%08X", prefix, value);
-    TraceLog(buf);
-#else
-    UNREFERENCED_PARAMETER(prefix);
-    UNREFERENCED_PARAMETER(value);
-#endif
-}
+//
+// begin_wpp config
+// FUNC TraceEvents(LEVEL, FLAGS, MSG, ...);
+// end_wpp
+//
