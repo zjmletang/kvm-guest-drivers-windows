@@ -12,7 +12,7 @@ RHEL inf substitutions and versioning used by all drivers.
     <!-- Third component of driver version -->
     <_BUILD_MAJOR_VERSION_ Condition="'$(_BUILD_MAJOR_VERSION_)' == ''">101</_BUILD_MAJOR_VERSION_>
     <!-- Fourth component of driver version -->
-    <_BUILD_MINOR_VERSION_ Condition="'$(_BUILD_MINOR_VERSION_)' == ''">58000</_BUILD_MINOR_VERSION_>
+    <_BUILD_MINOR_VERSION_ Condition="'$(_BUILD_MINOR_VERSION_)' == ''">58009</_BUILD_MINOR_VERSION_>
   </PropertyGroup>
 
   <PropertyGroup>

@@ -153,77 +153,6 @@ static NTSTATUS SetCurrentMode(_Inout_ PSTDVGA_DEVICE_CONTEXT DevCtx, _In_ UINT 
 // ---- DDI Implementations ----
 //
 
-// System thread to trigger hot-plug after StartDevice completes.
-// Calling DxgkCbIndicateChildStatus(StatusConnection, Connected=TRUE) forces
-// dxgkrnl to re-run mode discovery and call DxgkDdiRecommendFunctionalVidPn.
-//
-// IMPORTANT: All sleeps must be interruptible via pCtx->HotPlugStopEvent so
-// StopDevice can shut us down before the driver image is unmapped, otherwise
-// we crash with BugCheck 0xCE (DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS).
-//
-// Timing constants below are tuned empirically against cloud QEMU host I/O
-// jitter. Units are 100-nanosecond intervals (KeWaitForSingleObject
-// relative-timeout convention); negative = relative time.
-//
-//   STDVGA_HOTPLUG_PREFIRE_DELAY    Wait after StartDevice before announcing
-//                                   hot-plug. Lets dxgkrnl finish the start
-//                                   transaction and enter idle so it will
-//                                   honor the upcoming child-status change
-//                                   instead of dropping it on the floor.
-//
-//   STDVGA_HOTPLUG_DISCONNECT_HOLD  Gap between Disconnect and Connect.
-//                                   Gives dxgkrnl time to actually process
-//                                   the disconnect (invalidate cached mode
-//                                   list) before we plug back in; without
-//                                   this hold the pair is sometimes coalesced
-//                                   and the mode list is never re-queried.
-//
-#define STDVGA_HOTPLUG_PREFIRE_DELAY   (-20000000LL) // 2.0 s
-#define STDVGA_HOTPLUG_DISCONNECT_HOLD (-5000000LL)  // 0.5 s
-
-static VOID StdVgaHotPlugWorker(_In_ PVOID Context)
-{
-    PSTDVGA_DEVICE_CONTEXT pCtx = (PSTDVGA_DEVICE_CONTEXT)Context;
-    if (pCtx == NULL || pCtx->DxgkInterface.DxgkCbIndicateChildStatus == NULL)
-    {
-        PsTerminateSystemThread(STATUS_SUCCESS);
-        return;
-    }
-
-    LARGE_INTEGER delay;
-    delay.QuadPart = STDVGA_HOTPLUG_PREFIRE_DELAY;
-    NTSTATUS waitSt = KeWaitForSingleObject(&pCtx->HotPlugStopEvent, Executive, KernelMode, FALSE, &delay);
-    if (waitSt != STATUS_TIMEOUT)
-    {
-        // Stop signaled: bail out without touching DxgkInterface.
-        PsTerminateSystemThread(STATUS_SUCCESS);
-        return;
-    }
-
-    TraceLog("HotPlugWorker fire");
-
-    DXGK_CHILD_STATUS childStatus = {};
-    childStatus.Type = StatusConnection;
-    childStatus.ChildUid = 1;
-    childStatus.HotPlug.Connected = FALSE;
-    NTSTATUS st = pCtx->DxgkInterface.DxgkCbIndicateChildStatus(pCtx->DxgkInterface.DeviceHandle, &childStatus);
-    TraceLogStatus("HotPlug Disconnect", st);
-
-    delay.QuadPart = STDVGA_HOTPLUG_DISCONNECT_HOLD;
-    waitSt = KeWaitForSingleObject(&pCtx->HotPlugStopEvent, Executive, KernelMode, FALSE, &delay);
-    if (waitSt != STATUS_TIMEOUT)
-    {
-        PsTerminateSystemThread(STATUS_SUCCESS);
-        return;
-    }
-
-    childStatus.HotPlug.Connected = TRUE;
-    st = pCtx->DxgkInterface.DxgkCbIndicateChildStatus(pCtx->DxgkInterface.DeviceHandle, &childStatus);
-    TraceLogStatus("HotPlug Connect", st);
-
-    PsTerminateSystemThread(STATUS_SUCCESS);
-}
-
 _Use_decl_annotations_ NTSTATUS StdVgaStartDevice(PSTDVGA_DEVICE_CONTEXT DevCtx,
                                                   DXGK_START_INFO *pStartInfo,
                                                   DXGKRNL_INTERFACE *pDxgkInterface,
@@ -308,134 +237,6 @@ _Use_decl_annotations_ NTSTATUS StdVgaStartDevice(PSTDVGA_DEVICE_CONTEXT DevCtx,
 
     DevCtx->DriverStarted = TRUE;
 
-    // Read user-configurable target resolution from registry:
-    //   HKLM\System\CurrentControlSet\Services\StdVga\Parameters\TargetWidth
-    //   HKLM\System\CurrentControlSet\Services\StdVga\Parameters\TargetHeight
-    // Defaults to 1920x1080 (v50).
-    {
-        ULONG TW = 1920, TH = 1080;
-        UNICODE_STRING regPath;
-        RtlInitUnicodeString(&regPath, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\StdVga\\Parameters");
-        OBJECT_ATTRIBUTES oa;
-        InitializeObjectAttributes(&oa, &regPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        HANDLE hKey = NULL;
-        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &oa)) && hKey != NULL)
-        {
-            UCHAR buf[64];
-            ULONG resultLen = 0;
-            UNICODE_STRING vw, vh;
-            RtlInitUnicodeString(&vw, L"TargetWidth");
-            RtlInitUnicodeString(&vh, L"TargetHeight");
-            if (NT_SUCCESS(ZwQueryValueKey(hKey, &vw, KeyValuePartialInformation, buf, sizeof(buf), &resultLen)))
-            {
-                PKEY_VALUE_PARTIAL_INFORMATION pInfo = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
-                if (pInfo->Type == REG_DWORD && pInfo->DataLength == sizeof(ULONG))
-                {
-                    TW = *(PULONG)pInfo->Data;
-                }
-            }
-            if (NT_SUCCESS(ZwQueryValueKey(hKey, &vh, KeyValuePartialInformation, buf, sizeof(buf), &resultLen)))
-            {
-                PKEY_VALUE_PARTIAL_INFORMATION pInfo = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
-                if (pInfo->Type == REG_DWORD && pInfo->DataLength == sizeof(ULONG))
-                {
-                    TH = *(PULONG)pInfo->Data;
-                }
-            }
-            ZwClose(hKey);
-        }
-        TraceLogInt("StartDevice TgtW", (int)TW);
-        TraceLogInt("StartDevice TgtH", (int)TH);
-
-        // Validate against VRAM capacity.
-        SIZE_T req = (SIZE_T)TW * TH * STDVGA_BYTES_PER_PIXEL;
-        if (TW == 0 || TH == 0 || req > DevCtx->Hw.VramSize)
-        {
-            TW = 1920;
-            TH = 1080;
-        }
-
-        StdVgaHwSetMode(&DevCtx->Hw, (USHORT)TW, (USHORT)TH);
-        ULONG stridePx = DevCtx->Hw.CurrentStridePixels; // 8-aligned
-        ULONG stride = stridePx * STDVGA_BYTES_PER_PIXEL;
-        DevCtx->Hw.CurrentWidth = (USHORT)TW;
-        DevCtx->Hw.CurrentHeight = (USHORT)TH;
-
-        // Black out instead of splash, so when dxgkrnl finally commits,
-        // PresentDisplayOnly's rendered desktop replaces a clean black canvas.
-        // Splash is removed to verify dxgkrnl actually starts rendering.
-        if (DevCtx->Hw.pFrameBuffer != NULL)
-        {
-            for (ULONG y = 0; y < TH; y++)
-            {
-                PULONG row = (PULONG)((PUCHAR)DevCtx->Hw.pFrameBuffer + y * stride);
-                for (ULONG x = 0; x < stridePx; x++)
-                {
-                    row[x] = 0;
-                }
-            }
-        }
-
-        DevCtx->CurrentMode.SrcModeWidth = TW;
-        DevCtx->CurrentMode.SrcModeHeight = TH;
-        DevCtx->CurrentMode.DispInfo.Width = TW;
-        DevCtx->CurrentMode.DispInfo.Height = TH;
-        DevCtx->CurrentMode.DispInfo.Pitch = stride;
-        DevCtx->CurrentMode.DispInfo.ColorFormat = D3DDDIFMT_X8R8G8B8;
-        DevCtx->CurrentMode.DispInfo.PhysicAddress = DevCtx->Hw.FrameBufferPA;
-        DevCtx->CurrentMode.DispInfo.TargetId = 0;
-        DevCtx->CurrentMode.DispInfo.AcpiId = 0;
-    }
-
-    // Launch hot-plug worker thread to trigger dxgkrnl
-    // RecommendFunctionalVidPn path.
-    {
-        // Initialize stop signal + thread tracking BEFORE creating the thread,
-        // so a racing StopDevice always sees a valid event.
-        KeInitializeEvent(&DevCtx->HotPlugStopEvent, NotificationEvent, FALSE);
-        DevCtx->HotPlugThread = NULL;
-
-        HANDLE hThread = NULL;
-        OBJECT_ATTRIBUTES oa;
-        InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-        NTSTATUS thrSt = PsCreateSystemThread(&hThread,
-                                              THREAD_ALL_ACCESS,
-                                              &oa,
-                                              NULL,
-                                              NULL,
-                                              StdVgaHotPlugWorker,
-                                              DevCtx);
-        if (NT_SUCCESS(thrSt) && hThread != NULL)
-        {
-            // Hold a reference so StopDevice can KeWaitForSingleObject on it
-            // before the driver image is unmapped.
-            PETHREAD pThread = NULL;
-            NTSTATUS refSt = ObReferenceObjectByHandle(hThread,
-                                                       THREAD_ALL_ACCESS,
-                                                       *PsThreadType,
-                                                       KernelMode,
-                                                       (PVOID *)&pThread,
-                                                       NULL);
-            ZwClose(hThread);
-            if (NT_SUCCESS(refSt))
-            {
-                DevCtx->HotPlugThread = pThread;
-                TraceLog("StartDevice spawned HotPlugWorker");
-            }
-            else
-            {
-                // Reference failed: signal stop so the orphan worker bails out
-                // ASAP instead of touching DxgkInterface after unload.
-                KeSetEvent(&DevCtx->HotPlugStopEvent, IO_NO_INCREMENT, FALSE);
-                TraceLogStatus("StartDevice HotPlug ObRef FAIL", refSt);
-            }
-        }
-        else
-        {
-            TraceLogStatus("StartDevice HotPlugWorker FAIL", thrSt);
-        }
-    }
-
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "StartDevice EXIT OK");
     return STATUS_SUCCESS;
 }
@@ -446,42 +247,9 @@ _Use_decl_annotations_ NTSTATUS StdVgaStopDevice(PSTDVGA_DEVICE_CONTEXT DevCtx)
 
     DevCtx->DriverStarted = FALSE;
 
-    //
-    // Drain the hot-plug worker BEFORE we let DXGK unload the driver image.
-    // Skipping this caused BugCheck 0xCE
-    // (DRIVER_UNLOADED_WITHOUT_CANCELLING_PENDING_OPERATIONS) when the worker
-    // was still sleeping inside its delay and the module got unmapped under it.
-    //
-    StdVgaDrainHotPlugWorker(DevCtx);
-
     StdVgaHwClose(&DevCtx->Hw);
 
     return STATUS_SUCCESS;
-}
-
-//
-// Synchronously drain the hot-plug worker spawned by StartDevice.
-// Idempotent: safe to call from StopDevice and RemoveDevice both.
-// Must be called while DevCtx is still valid (before ExFreePoolWithTag),
-// otherwise the worker may wake up and dereference freed memory or run on
-// an unmapped driver image (BugCheck 0xCE).
-//
-VOID StdVgaDrainHotPlugWorker(PSTDVGA_DEVICE_CONTEXT DevCtx)
-{
-    PAGED_CODE();
-
-    if (DevCtx == NULL)
-    {
-        return;
-    }
-
-    if (DevCtx->HotPlugThread != NULL)
-    {
-        KeSetEvent(&DevCtx->HotPlugStopEvent, IO_NO_INCREMENT, FALSE);
-        KeWaitForSingleObject(DevCtx->HotPlugThread, Executive, KernelMode, FALSE, NULL);
-        ObDereferenceObject(DevCtx->HotPlugThread);
-        DevCtx->HotPlugThread = NULL;
-    }
 }
 
 _Use_decl_annotations_ VOID StdVgaResetDevice(PSTDVGA_DEVICE_CONTEXT DevCtx)
@@ -1299,7 +1067,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
         return status;
     }
 
-    // Use the resolution the driver just SetMode'd to (from registry).
+    // Use the current hardware/display resolution as the initial recommendation.
     // This ensures hw state matches what we recommend to dxgkrnl.
     USHORT w = DevCtx->Hw.CurrentWidth;
     USHORT h = DevCtx->Hw.CurrentHeight;

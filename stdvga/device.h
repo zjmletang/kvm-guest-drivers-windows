@@ -118,8 +118,6 @@ StdVgaUpdateActiveVidPnPresentPath(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx,
 NTSTATUS
 StdVgaQueryVidPnHWCapability(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx, _Inout_ DXGKARG_QUERYVIDPNHWCAPABILITY *pVidPnHWCaps);
 
-VOID StdVgaDrainHotPlugWorker(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx);
-
 NTSTATUS
 StdVgaStopDeviceAndReleasePostDisplayOwnership(_In_ PSTDVGA_DEVICE_CONTEXT DevCtx,
                                                _In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
