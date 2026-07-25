@@ -31,69 +31,14 @@
 
 #pragma code_seg("PAGE")
 
-//
-// Helper: fill a D3DKMDT_VIDEO_SIGNAL_INFO for a given mode.
-// Provide explicit 60Hz timing so Windows mode-matching can correlate
-// target modes with EDID-derived monitor modes in Display Settings.
-//
-// VESA DMT / industry-standard timings keyed by resolution. dxgkrnl validates
-// target VideoSignalInfo against EDID-parsed monitor modes and rejects entries
-// whose timing doesn't match a recognized standard timing
-// (STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED). Using these canonical numbers
-// keeps the target mode set aligned with what the kernel derives from the EDID.
-struct STDVGA_VESA_TIMING
-{
-    USHORT W;
-    USHORT H;
-    UINT HTotal;
-    UINT VTotal;
-    ULONG PixelRateHz; // PixelRate per VESA spec
-};
-
-/*
-// clang-format off
-static const STDVGA_VESA_TIMING s_VesaTimings[] = {
-    {800, 600, 1056, 628, 40000000},     // SVGA @60
-    {1024, 768, 1344, 806, 65000000},    // XGA @60
-    {1152, 864, 1600, 900, 108000000},   // XGA+ @75
-    {1280, 720, 1650, 750, 74250000},    // 720p @60
-    {1280, 768, 1664, 798, 79500000},    // WXGA @60 CVT
-    {1280, 800, 1680, 831, 83500000},    // WXGA @60
-    {1280, 960, 1800, 1000, 108000000},  // SXGA- @60
-    {1280, 1024, 1688, 1066, 108000000}, // SXGA @60
-    {1400, 1050, 1864, 1089, 121750000}, // SXGA+ @60
-    {1440, 900, 1904, 934, 106500000},   // WXGA++ @60
-    {1600, 1200, 2160, 1250, 162000000}, // UXGA @60
-    {1680, 1050, 2240, 1089, 146250000}, // WSXGA+ @60
-    {1920, 1080, 2200, 1125, 148500000}, // 1080p @60
-    {1920, 1200, 2080, 1235, 154000000}, // WUXGA-RB @60
-    {2560, 1600, 2720, 1646, 268500000}, // WQXGA-RB @60
-};
-// clang-format on
-
-[[maybe_unused]]
-static const STDVGA_VESA_TIMING *LookupVesaTiming(USHORT Width, USHORT Height)
-{
-    for (ULONG i = 0; i < ARRAYSIZE(s_VesaTimings); i++)
-    {
-        if (s_VesaTimings[i].W == Width && s_VesaTimings[i].H == Height)
-        {
-            return &s_VesaTimings[i];
-        }
-    }
-    return NULL;
-}
-*/
-
 static VOID BuildVideoSignalInfo(_Out_ D3DKMDT_VIDEO_SIGNAL_INFO *pSignalInfo, _In_ USHORT Width, _In_ USHORT Height)
 {
     PAGED_CODE();
     RtlZeroMemory(pSignalInfo, sizeof(*pSignalInfo));
 
-    // Match QXL/VirtIO-GPU KMDOD exactly. All frequency fields use
-    // D3DKMDT_FREQUENCY_NOTSPECIFIED so dxgkrnl skips the timing
-    // self-consistency check that was making pfnAddMode reject every mode
-    // with INVALID_FREQUENCY in v23-v47.
+    // Use unspecified sync frequencies so dxgkrnl matches the mode by its
+    // active size instead of rejecting synthetic timings that do not come from
+    // a physical monitor timing table.
     pSignalInfo->VideoStandard = D3DKMDT_VSS_OTHER;
     pSignalInfo->TotalSize.cx = Width; // no blanking
     pSignalInfo->TotalSize.cy = Height;
@@ -169,7 +114,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaStartDevice(PSTDVGA_DEVICE_CONTEXT DevCtx,
     NTSTATUS status = pDxgkInterface->DxgkCbGetDeviceInformation(pDxgkInterface->DeviceHandle, &deviceInfo);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "StartDevice GetDevInfo FAIL", status);
+        TraceEvents(TRACE_LEVEL_ERROR, DBG_ALL, "%s 0x%08X", "StartDevice GetDevInfo FAIL", status);
         return status;
     }
 
@@ -178,23 +123,23 @@ _Use_decl_annotations_ NTSTATUS StdVgaStartDevice(PSTDVGA_DEVICE_CONTEXT DevCtx,
     status = StdVgaHwInit(&DevCtx->Hw, deviceInfo.TranslatedResourceList);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "StartDevice HwInit FAIL", status);
+        TraceEvents(TRACE_LEVEL_ERROR, DBG_ALL, "%s 0x%08X", "StartDevice HwInit FAIL", status);
         return status;
     }
 
-    TraceEvents(TRACE_LEVEL_INFORMATION,
+    TraceEvents(TRACE_LEVEL_VERBOSE,
                 DBG_ALL,
                 "%s=0x%08X",
                 "StartDevice FB_PA_hi",
                 (int)(DevCtx->Hw.FrameBufferPA.QuadPart >> 32));
-    TraceEvents(TRACE_LEVEL_INFORMATION,
+    TraceEvents(TRACE_LEVEL_VERBOSE,
                 DBG_ALL,
                 "%s=0x%08X",
                 "StartDevice FB_PA_lo",
                 (int)(DevCtx->Hw.FrameBufferPA.QuadPart & 0xFFFFFFFF));
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "StartDevice FB_Len", (int)DevCtx->Hw.FrameBufferLength);
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "StartDevice VRAM", (int)DevCtx->Hw.VramSize);
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "StartDevice UseMmio", DevCtx->Hw.UseMmio ? 1 : 0);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "StartDevice FB_Len", (int)DevCtx->Hw.FrameBufferLength);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "StartDevice VRAM", (int)DevCtx->Hw.VramSize);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "StartDevice UseMmio", DevCtx->Hw.UseMmio ? 1 : 0);
 
     //
     // Acquire post-display ownership. This is required to transfer display
@@ -207,26 +152,24 @@ _Use_decl_annotations_ NTSTATUS StdVgaStartDevice(PSTDVGA_DEVICE_CONTEXT DevCtx,
     status = DevCtx->DxgkInterface.DxgkCbAcquirePostDisplayOwnership(DevCtx->DxgkInterface.DeviceHandle, &dispInfo);
     if (NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "StartDevice AcqPost w", (int)dispInfo.Width);
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "StartDevice AcqPost h", (int)dispInfo.Height);
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "StartDevice AcqPost w", (int)dispInfo.Width);
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "StartDevice AcqPost h", (int)dispInfo.Height);
     }
     else
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "StartDevice AcqPost FAIL", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "StartDevice AcqPost FAIL", status);
     }
 
     //
-    // Always program the hardware to a well-known default resolution at
-    // StartDevice. There is no registry-backed persistence of a previously
-    // requested mode (the registry-based configuration mechanism was
-    // deliberately removed), so relying on whatever the firmware/BIOS
-    // happened to leave the hardware at would make the initial recommended
-    // resolution unpredictable across boots.
+    // Program a conservative default at StartDevice. Larger modes remain
+    // available through Windows display settings or stdvgares.exe after startup.
+    // This avoids spending extra CPU on a high-resolution framebuffer unless the
+    // user explicitly requests one.
     //
     status = SetCurrentMode(DevCtx, STDVGA_DEFAULT_WIDTH, STDVGA_DEFAULT_HEIGHT);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "StartDevice default SetMode FAIL", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "StartDevice default SetMode FAIL", status);
 
         USHORT curW, curH;
         StdVgaHwGetCurrentMode(&DevCtx->Hw, &curW, &curH);
@@ -287,7 +230,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaSetPowerState(PSTDVGA_DEVICE_CONTEXT DevCt
                                                     POWER_ACTION ActionType)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "SetPowerState ENTER");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "SetPowerState ENTER");
     UNREFERENCED_PARAMETER(ActionType);
 
     if (DeviceUid == DISPLAY_ADAPTER_HW_ID)
@@ -307,16 +250,13 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryChildRelations(PSTDVGA_DEVICE_CONTEXT
                                                           ULONG ChildRelationsSize)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryChildRelations ENTER");
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "QueryChildRelations Size", (int)ChildRelationsSize);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryChildRelations ENTER");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "QueryChildRelations Size", (int)ChildRelationsSize);
     UNREFERENCED_PARAMETER(DevCtx);
 
     RtlZeroMemory(pChildRelations, ChildRelationsSize);
 
-    // VOT_HD15 + EDID + RecommendMonitorModes + VSS_VESA_DMT.
-    // The new theory: dxgkrnl uses VideoStandard field to decide validation
-    // path. VSS_VESA_DMT triggers VESA table lookup (looser); VSS_OTHER
-    // triggers strict self-consistency check.
+    // Always-connected VGA output with synthetic EDID-backed monitor modes.
     pChildRelations[0].ChildDeviceType = TypeVideoOutput;
     pChildRelations[0].ChildCapabilities.HpdAwareness = HpdAwarenessAlwaysConnected;
     pChildRelations[0].ChildCapabilities.Type.VideoOutput.InterfaceTechnology = D3DKMDT_VOT_HD15;
@@ -325,7 +265,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryChildRelations(PSTDVGA_DEVICE_CONTEXT
     pChildRelations[0].AcpiUid = 0;
     pChildRelations[0].ChildUid = 0;
 
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryChildRelations EXIT OK");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryChildRelations EXIT OK");
     return STATUS_SUCCESS;
 }
 
@@ -334,7 +274,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryChildStatus(PSTDVGA_DEVICE_CONTEXT De
                                                        BOOLEAN NonDestructiveOnly)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryChildStatus ENTER");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryChildStatus ENTER");
     UNREFERENCED_PARAMETER(DevCtx);
     UNREFERENCED_PARAMETER(NonDestructiveOnly);
 
@@ -356,7 +296,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryChildStatus(PSTDVGA_DEVICE_CONTEXT De
 // Established timings: 800x600, 1024x768
 // Standard timings: 1152x864, 1280x720, 1280x800, 1280x960, 1280x1024,
 //                   1400x1050, 1440x900, 1600x1200
-// DTD 1: 1920x1080@60 (preferred/default), DTD 2: 2560x1600@60
+// DTD 1: 1920x1080@60 (preferred), DTD 2: 2560x1600@60
 // Not in EDID but in mode list (works via NOTSPECIFIED timing): 1280x768,
 //   1680x1050, 1920x1200
 // clang-format off
@@ -525,8 +465,8 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryDeviceDescriptor(PSTDVGA_DEVICE_CONTE
     UNREFERENCED_PARAMETER(DevCtx);
     UNREFERENCED_PARAMETER(ChildUid);
 
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryDeviceDescriptor ENTER");
-    TraceEvents(TRACE_LEVEL_INFORMATION,
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryDeviceDescriptor ENTER");
+    TraceEvents(TRACE_LEVEL_VERBOSE,
                 DBG_ALL,
                 "%s=0x%08X",
                 "QueryDeviceDescriptor BlockId",
@@ -550,25 +490,21 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryAdapterInfo(PSTDVGA_DEVICE_CONTEXT De
                                                        CONST DXGKARG_QUERYADAPTERINFO *pQueryAdapterInfo)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryAdapterInfo ENTER");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryAdapterInfo ENTER");
     UNREFERENCED_PARAMETER(DevCtx);
 
-    TraceEvents(TRACE_LEVEL_INFORMATION,
-                DBG_ALL,
-                "%s 0x%08X",
-                "QueryAdapterInfo Type",
-                (NTSTATUS)pQueryAdapterInfo->Type);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s 0x%08X", "QueryAdapterInfo Type", (NTSTATUS)pQueryAdapterInfo->Type);
 
     switch (pQueryAdapterInfo->Type)
     {
         case DXGKQAITYPE_DRIVERCAPS:
             {
-                TraceEvents(TRACE_LEVEL_INFORMATION,
+                TraceEvents(TRACE_LEVEL_VERBOSE,
                             DBG_ALL,
                             "%s=0x%08X",
                             "DRIVERCAPS bufSize",
                             (int)pQueryAdapterInfo->OutputDataSize);
-                TraceEvents(TRACE_LEVEL_INFORMATION,
+                TraceEvents(TRACE_LEVEL_VERBOSE,
                             DBG_ALL,
                             "%s=0x%08X",
                             "DRIVERCAPS sizeof",
@@ -602,7 +538,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryAdapterInfo(PSTDVGA_DEVICE_CONTEXT De
                 pCaps->SupportNonVGA = TRUE;
                 pCaps->SupportSmoothRotation = FALSE;
 
-                TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryAdapterInfo DRIVERCAPS OK");
+                TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryAdapterInfo DRIVERCAPS OK");
                 return STATUS_SUCCESS;
             }
 
@@ -622,7 +558,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryAdapterInfo(PSTDVGA_DEVICE_CONTEXT De
                     pSegOut->PagingBufferSegmentId = 0;
                     pSegOut->PagingBufferSize = 64 * 1024;
                     pSegOut->PagingBufferPrivateDataSize = 0;
-                    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryAdapterInfo QUERYSEGMENT count=1");
+                    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryAdapterInfo QUERYSEGMENT count=1");
                 }
                 else
                 {
@@ -643,7 +579,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryAdapterInfo(PSTDVGA_DEVICE_CONTEXT De
                     pSegOut->PagingBufferSegmentId = 0;
                     pSegOut->PagingBufferSize = 64 * 1024;
                     pSegOut->PagingBufferPrivateDataSize = 0;
-                    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryAdapterInfo QUERYSEGMENT filled");
+                    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryAdapterInfo QUERYSEGMENT filled");
                 }
                 return STATUS_SUCCESS;
             }
@@ -663,7 +599,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryAdapterInfo(PSTDVGA_DEVICE_CONTEXT De
                     pSegOut->PagingBufferSegmentId = 0;
                     pSegOut->PagingBufferSize = 64 * 1024;
                     pSegOut->PagingBufferPrivateDataSize = 0;
-                    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryAdapterInfo QUERYSEGMENT3 count=1");
+                    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryAdapterInfo QUERYSEGMENT3 count=1");
                 }
                 else
                 {
@@ -683,7 +619,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryAdapterInfo(PSTDVGA_DEVICE_CONTEXT De
                     pSegOut->PagingBufferSegmentId = 0;
                     pSegOut->PagingBufferSize = 64 * 1024;
                     pSegOut->PagingBufferPrivateDataSize = 0;
-                    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryAdapterInfo QUERYSEGMENT3 filled");
+                    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryAdapterInfo QUERYSEGMENT3 filled");
                 }
                 return STATUS_SUCCESS;
             }
@@ -698,13 +634,13 @@ _Use_decl_annotations_ NTSTATUS StdVgaQueryAdapterInfo(PSTDVGA_DEVICE_CONTEXT De
 
                 RtlZeroMemory(pQueryAdapterInfo->pOutputData, pQueryAdapterInfo->OutputDataSize);
 
-                TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "QueryAdapterInfo DISPLAY_EXT OK");
+                TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "QueryAdapterInfo DISPLAY_EXT OK");
                 return STATUS_SUCCESS;
             }
 #endif
 
         default:
-            TraceEvents(TRACE_LEVEL_INFORMATION,
+            TraceEvents(TRACE_LEVEL_VERBOSE,
                         DBG_ALL,
                         "%s 0x%08X",
                         "QueryAdapterInfo type",
@@ -771,8 +707,8 @@ _Use_decl_annotations_ NTSTATUS StdVgaEscape(PSTDVGA_DEVICE_CONTEXT DevCtx, CONS
         return STATUS_INVALID_PARAMETER;
     }
 
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "Escape SetRes W", (int)newW);
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "Escape SetRes H", (int)newH);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "Escape SetRes W", (int)newW);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "Escape SetRes H", (int)newH);
 
     StdVgaHwSetMode(&DevCtx->Hw, (USHORT)newW, (USHORT)newH);
     ULONG stridePx = DevCtx->Hw.CurrentStridePixels;
@@ -915,7 +851,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
                                                        DXGKARG_ISSUPPORTEDVIDPN *pIsSupportedVidPn)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "IsSupportedVidPn ENTER");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "IsSupportedVidPn ENTER");
 
     if (pIsSupportedVidPn->hDesiredVidPn == 0)
     {
@@ -929,7 +865,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
                                                                       &pVidPnInterface);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  IsSup QueryIface", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  IsSup QueryIface", status);
         return status;
     }
 
@@ -938,7 +874,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
     status = pVidPnInterface->pfnGetTopology(pIsSupportedVidPn->hDesiredVidPn, &hTopology, &pTopologyInterface);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  IsSup GetTopo", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  IsSup GetTopo", status);
         return status;
     }
 
@@ -964,7 +900,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
 
             if (!supported)
             {
-                TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "  IsSup srcREJECT");
+                TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "  IsSup srcREJECT");
                 pIsSupportedVidPn->IsVidPnSupported = FALSE;
                 pVidPnInterface->pfnReleaseSourceModeSet(pIsSupportedVidPn->hDesiredVidPn, hSourceModeSet);
                 return STATUS_SUCCESS;
@@ -992,7 +928,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
         pTargetModeSetInterface->pfnGetNumModes(hTargetModeSet, &tgtCount);
         if (s_isSuppCount <= 5)
         {
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  IsSup tgtCount", (int)tgtCount);
+            TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  IsSup tgtCount", (int)tgtCount);
         }
 
         const D3DKMDT_VIDPN_TARGET_MODE *pPinnedTarget = NULL;
@@ -1001,27 +937,27 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
         {
             if (s_isSuppCount <= 5)
             {
-                TraceEvents(TRACE_LEVEL_INFORMATION,
+                TraceEvents(TRACE_LEVEL_VERBOSE,
                             DBG_ALL,
                             "%s=0x%08X",
                             "  IsSup tgtPin W",
                             (int)pPinnedTarget->VideoSignalInfo.ActiveSize.cx);
-                TraceEvents(TRACE_LEVEL_INFORMATION,
+                TraceEvents(TRACE_LEVEL_VERBOSE,
                             DBG_ALL,
                             "%s=0x%08X",
                             "  IsSup tgtPin H",
                             (int)pPinnedTarget->VideoSignalInfo.ActiveSize.cy);
-                TraceEvents(TRACE_LEVEL_INFORMATION,
+                TraceEvents(TRACE_LEVEL_VERBOSE,
                             DBG_ALL,
                             "%s=0x%08X",
                             "  IsSup tgtTotalW",
                             (int)pPinnedTarget->VideoSignalInfo.TotalSize.cx);
-                TraceEvents(TRACE_LEVEL_INFORMATION,
+                TraceEvents(TRACE_LEVEL_VERBOSE,
                             DBG_ALL,
                             "%s=0x%08X",
                             "  IsSup tgtTotalH",
                             (int)pPinnedTarget->VideoSignalInfo.TotalSize.cy);
-                TraceEvents(TRACE_LEVEL_INFORMATION,
+                TraceEvents(TRACE_LEVEL_VERBOSE,
                             DBG_ALL,
                             "%s=0x%08X",
                             "  IsSup tgtPixRate",
@@ -1035,7 +971,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
 
             if (!supported)
             {
-                TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "  IsSup tgtREJECT");
+                TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "  IsSup tgtREJECT");
                 pIsSupportedVidPn->IsVidPnSupported = FALSE;
                 pVidPnInterface->pfnReleaseTargetModeSet(pIsSupportedVidPn->hDesiredVidPn, hTargetModeSet);
                 return STATUS_SUCCESS;
@@ -1052,7 +988,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaIsSupportedVidPn(PSTDVGA_DEVICE_CONTEXT De
     // to mode-set negotiation) is accepted so DxgkDdiEnumVidPnCofuncModality
     // and DxgkDdiCommitVidPn get a chance to run.
     pIsSupportedVidPn->IsVidPnSupported = TRUE;
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "  IsSup OK");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "  IsSup OK");
     return STATUS_SUCCESS;
 }
 
@@ -1061,7 +997,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
                                CONST DXGKARG_RECOMMENDFUNCTIONALVIDPN *pRecommendFunctionalVidPn)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "RecommendFunctionalVidPn ENTER");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "RecommendFunctionalVidPn ENTER");
 
     D3DKMDT_HVIDPN hVidPn = pRecommendFunctionalVidPn->hRecommendedFunctionalVidPn;
 
@@ -1071,7 +1007,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
                                                                       &pVidPnInterface);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP QueryIface", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP QueryIface", status);
         return status;
     }
 
@@ -1081,7 +1017,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
     status = pVidPnInterface->pfnGetTopology(hVidPn, &hTopology, &pTopoInterface);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP GetTopo", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP GetTopo", status);
         return status;
     }
 
@@ -1089,7 +1025,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
     status = pTopoInterface->pfnCreateNewPathInfo(hTopology, &pNewPath);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP CreatePath", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP CreatePath", status);
         return status;
     }
     pNewPath->VidPnSourceId = 0;
@@ -1105,7 +1041,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
     status = pTopoInterface->pfnAddPath(hTopology, pNewPath);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP AddPath", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP AddPath", status);
         pTopoInterface->pfnReleasePathInfo(hTopology, pNewPath);
         return status;
     }
@@ -1124,8 +1060,8 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
         w = STDVGA_DEFAULT_WIDTH;
         h = STDVGA_DEFAULT_HEIGHT;
     }
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  RecFVP useW", (int)w);
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  RecFVP useH", (int)h);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  RecFVP useW", (int)w);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  RecFVP useH", (int)h);
 
     // Create source mode set, add one mode, pin it.
     D3DKMDT_HVIDPNSOURCEMODESET hSrcModeSet = 0;
@@ -1133,7 +1069,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
     status = pVidPnInterface->pfnCreateNewSourceModeSet(hVidPn, 0, &hSrcModeSet, &pSrcInterface);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP CreateSrc", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP CreateSrc", status);
         return status;
     }
 
@@ -1154,7 +1090,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
         status = pSrcInterface->pfnAddMode(hSrcModeSet, pSrcMode);
         if (!NT_SUCCESS(status))
         {
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP SrcAdd", status);
+            TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP SrcAdd", status);
             pSrcInterface->pfnReleaseModeInfo(hSrcModeSet, pSrcMode);
             pVidPnInterface->pfnReleaseSourceModeSet(hVidPn, hSrcModeSet);
             return status;
@@ -1163,14 +1099,14 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
         status = pSrcInterface->pfnPinMode(hSrcModeSet, pSrcMode->Id);
         if (!NT_SUCCESS(status))
         {
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP SrcPin", status);
+            TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP SrcPin", status);
         }
     }
 
     status = pVidPnInterface->pfnAssignSourceModeSet(hVidPn, 0, hSrcModeSet);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP AssignSrc", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP AssignSrc", status);
         pVidPnInterface->pfnReleaseSourceModeSet(hVidPn, hSrcModeSet);
         return status;
     }
@@ -1181,7 +1117,7 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
     status = pVidPnInterface->pfnCreateNewTargetModeSet(hVidPn, 0, &hTgtModeSet, &pTgtInterface);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP CreateTgt", status);
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP CreateTgt", status);
         return status;
     }
 
@@ -1193,9 +1129,9 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
         BuildVideoSignalInfo(&pTgtMode->VideoSignalInfo, w, h);
 
         status = pTgtInterface->pfnAddMode(hTgtModeSet, pTgtMode);
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP TgtAdd", status);
         if (!NT_SUCCESS(status))
         {
+            TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP TgtAdd", status);
             pTgtInterface->pfnReleaseModeInfo(hTgtModeSet, pTgtMode);
             pVidPnInterface->pfnReleaseTargetModeSet(hVidPn, hTgtModeSet);
             return status;
@@ -1204,19 +1140,19 @@ StdVgaRecommendFunctionalVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
         status = pTgtInterface->pfnPinMode(hTgtModeSet, pTgtMode->Id);
         if (!NT_SUCCESS(status))
         {
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP TgtPin", status);
+            TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP TgtPin", status);
         }
     }
 
     status = pVidPnInterface->pfnAssignTargetModeSet(hVidPn, 0, hTgtModeSet);
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  RecFVP AssignTgt", status);
     if (!NT_SUCCESS(status))
     {
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  RecFVP AssignTgt", status);
         pVidPnInterface->pfnReleaseTargetModeSet(hVidPn, hTgtModeSet);
         return status;
     }
 
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "RecommendFunctionalVidPn OK");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "RecommendFunctionalVidPn OK");
     return STATUS_SUCCESS;
 }
 
@@ -1229,7 +1165,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
     s_enumCount++;
     if (s_enumCount <= 20)
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION,
+        TraceEvents(TRACE_LEVEL_VERBOSE,
                     DBG_ALL,
                     "%s=0x%08X",
                     "EnumCofuncV2 pivot",
@@ -1275,12 +1211,8 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
 
     if (s_enumCount <= 10)
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION,
-                    DBG_ALL,
-                    "%s=0x%08X",
-                    "  Scaling",
-                    (int)pPath->ContentTransformation.Scaling);
-        TraceEvents(TRACE_LEVEL_INFORMATION,
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  Scaling", (int)pPath->ContentTransformation.Scaling);
+        TraceEvents(TRACE_LEVEL_VERBOSE,
                     DBG_ALL,
                     "%s=0x%08X",
                     "  Rotation",
@@ -1323,12 +1255,13 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
     status = pTopologyInterface->pfnUpdatePathSupportInfo(hTopology, pPathMut);
     if (s_enumCount <= 10)
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  UpdatePathSupportInfo", status);
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s 0x%08X", "  UpdatePathSupportInfo", status);
     }
     pTopologyInterface->pfnReleasePathInfo(hTopology, pPath);
 
     if (!NT_SUCCESS(status))
     {
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  UpdatePathSupportInfo", status);
         return status;
     }
 
@@ -1357,7 +1290,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
                                                       &pTargetModeSetInterface);
     if (s_enumCount <= 10)
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  AcqTgtModeSet", status);
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s 0x%08X", "  AcqTgtModeSet", status);
     }
     if (NT_SUCCESS(status))
     {
@@ -1373,9 +1306,9 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
 
     if (s_enumCount <= 10)
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  srcPinned", pPinnedSourceMode != NULL ? 1 : 0);
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  tgtPinned", pPinnedTargetMode != NULL ? 1 : 0);
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  tgtModes", (int)tgtModeCount);
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  srcPinned", pPinnedSourceMode != NULL ? 1 : 0);
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  tgtPinned", pPinnedTargetMode != NULL ? 1 : 0);
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  tgtModes", (int)tgtModeCount);
     }
 
     //
@@ -1449,7 +1382,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
 
             if (s_enumCount <= 5)
             {
-                TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  SrcAdded", (int)srcAdded);
+                TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  SrcAdded", (int)srcAdded);
             }
 
             status = pVidPnInterface->pfnAssignSourceModeSet(pEnumCofuncModality->hConstrainingVidPn,
@@ -1485,7 +1418,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
     {
         if (s_enumCount <= 10)
         {
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  TGT_BUILD targetId", (int)targetId);
+            TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  TGT_BUILD targetId", (int)targetId);
         }
 
         // Release any pre-acquired existing target mode set so we can replace
@@ -1506,7 +1439,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
 
         if (s_enumCount <= 10)
         {
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  CreateNewTgtMS", status);
+            TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s 0x%08X", "  CreateNewTgtMS", status);
         }
 
         if (NT_SUCCESS(status))
@@ -1528,7 +1461,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
                                                                   &pMonSetIface);
                 if (s_enumCount <= 10)
                 {
-                    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  AcqMonModeSet", monSt);
+                    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s 0x%08X", "  AcqMonModeSet", monSt);
                 }
             }
 
@@ -1574,7 +1507,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
                 }
                 if (s_enumCount <= 5)
                 {
-                    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  TgtAdded", (int)tgtAdded);
+                    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  TgtAdded", (int)tgtAdded);
                 }
             }
 
@@ -1585,7 +1518,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
 
             if (s_enumCount <= 10)
             {
-                TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "  TgtAdded", (int)tgtAdded);
+                TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "  TgtAdded", (int)tgtAdded);
             }
 
             status = pVidPnInterface->pfnAssignTargetModeSet(pEnumCofuncModality->hConstrainingVidPn,
@@ -1593,7 +1526,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
                                                              hNewTgtModeSet);
             if (!NT_SUCCESS(status))
             {
-                TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "  AssignTgt FAIL", status);
+                TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "  AssignTgt FAIL", status);
                 pVidPnInterface->pfnReleaseTargetModeSet(pEnumCofuncModality->hConstrainingVidPn, hNewTgtModeSet);
             }
         }
@@ -1602,7 +1535,7 @@ StdVgaEnumVidPnCofuncModality(PSTDVGA_DEVICE_CONTEXT DevCtx, CONST DXGKARG_ENUMV
     {
         if (s_enumCount <= 10)
         {
-            TraceEvents(TRACE_LEVEL_INFORMATION,
+            TraceEvents(TRACE_LEVEL_VERBOSE,
                         DBG_ALL,
                         "%s=0x%08X",
                         "  TGT_SKIP pinned",
@@ -1627,7 +1560,7 @@ StdVgaSetVidPnSourceVisibility(PSTDVGA_DEVICE_CONTEXT DevCtx,
                                CONST DXGKARG_SETVIDPNSOURCEVISIBILITY *pSetVidPnSourceVisibility)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION,
+    TraceEvents(TRACE_LEVEL_VERBOSE,
                 DBG_ALL,
                 "%s=0x%08X",
                 "SetVisibility visible",
@@ -1652,7 +1585,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaCommitVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
                                                   CONST DXGKARG_COMMITVIDPN *pCommitVidPn)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn ENTER");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "CommitVidPn ENTER");
 
     const DXGK_VIDPN_INTERFACE *pVidPnInterface = NULL;
     NTSTATUS status = DevCtx->DxgkInterface.DxgkCbQueryVidPnInterface(pCommitVidPn->hFunctionalVidPn,
@@ -1660,21 +1593,21 @@ _Use_decl_annotations_ NTSTATUS StdVgaCommitVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
                                                                       &pVidPnInterface);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn QueryIf FAIL");
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "CommitVidPn QueryIf FAIL");
         return status;
     }
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn QueryIf OK");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "CommitVidPn QueryIf OK");
 
     //
     // If the path is being invalidated, turn off display and return.
     //
     if (pCommitVidPn->Flags.PathPoweredOff)
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn PathPoweredOff");
+        TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "CommitVidPn PathPoweredOff");
         DevCtx->CurrentMode.Flags.SourceNotVisible = 1;
         return STATUS_SUCCESS;
     }
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn not powered off");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "CommitVidPn not powered off");
 
     //
     // Get the source mode to determine resolution.
@@ -1687,26 +1620,26 @@ _Use_decl_annotations_ NTSTATUS StdVgaCommitVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
                                                       &pSourceModeSetInterface);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn AcqSrcSet FAIL");
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "CommitVidPn AcqSrcSet FAIL");
         return status;
     }
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn AcqSrcSet OK");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "CommitVidPn AcqSrcSet OK");
 
     const D3DKMDT_VIDPN_SOURCE_MODE *pPinnedMode = NULL;
     status = pSourceModeSetInterface->pfnAcquirePinnedModeInfo(hSourceModeSet, &pPinnedMode);
     if (!NT_SUCCESS(status) || pPinnedMode == NULL)
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn NoPinnedSrc");
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "CommitVidPn NoPinnedSrc");
         pVidPnInterface->pfnReleaseSourceModeSet(pCommitVidPn->hFunctionalVidPn, hSourceModeSet);
         return status == STATUS_SUCCESS ? STATUS_UNSUCCESSFUL : status;
     }
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn got pinned mode");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "CommitVidPn got pinned mode");
 
     UINT width = pPinnedMode->Format.Graphics.PrimSurfSize.cx;
     UINT height = pPinnedMode->Format.Graphics.PrimSurfSize.cy;
 
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "CommitVidPn w", (int)width);
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "CommitVidPn h", (int)height);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "CommitVidPn w", (int)width);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "CommitVidPn h", (int)height);
 
     pSourceModeSetInterface->pfnReleaseModeInfo(hSourceModeSet, pPinnedMode);
     pVidPnInterface->pfnReleaseSourceModeSet(pCommitVidPn->hFunctionalVidPn, hSourceModeSet);
@@ -1717,11 +1650,11 @@ _Use_decl_annotations_ NTSTATUS StdVgaCommitVidPn(PSTDVGA_DEVICE_CONTEXT DevCtx,
     status = SetCurrentMode(DevCtx, width, height);
     if (!NT_SUCCESS(status))
     {
-        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn SetMode FAIL");
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "CommitVidPn SetMode FAIL");
         return status;
     }
 
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "CommitVidPn SUCCESS");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "CommitVidPn SUCCESS");
     DevCtx->CurrentMode.Flags.SourceNotVisible = 0;
     DevCtx->CurrentMode.Flags.FrameBufferIsActive = 1;
 
@@ -1758,7 +1691,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaRecommendMonitorModes(PSTDVGA_DEVICE_CONTE
                                                             CONST DXGKARG_RECOMMENDMONITORMODES *pRecommendMonitorModes)
 {
     PAGED_CODE();
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "RecommendMonitorModes ENTER (v49 full list)");
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "RecommendMonitorModes ENTER");
 
     D3DKMDT_HMONITORSOURCEMODESET hModeSet = pRecommendMonitorModes->hMonitorSourceModeSet;
     const DXGK_MONITORSOURCEMODESET_INTERFACE *pModeSetInterface = pRecommendMonitorModes->pMonitorSourceModeSetInterface;
@@ -1787,7 +1720,7 @@ _Use_decl_annotations_ NTSTATUS StdVgaRecommendMonitorModes(PSTDVGA_DEVICE_CONTE
             {
                 continue;
             }
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "RecMonModes CreateErr", status);
+            TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "RecMonModes CreateErr", status);
             return status;
         }
 
@@ -1809,13 +1742,13 @@ _Use_decl_annotations_ NTSTATUS StdVgaRecommendMonitorModes(PSTDVGA_DEVICE_CONTE
             {
                 continue;
             }
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s 0x%08X", "RecMonModes AddErr", status);
+            TraceEvents(TRACE_LEVEL_WARNING, DBG_ALL, "%s 0x%08X", "RecMonModes AddErr", status);
             return status;
         }
         monAdded++;
     }
 
-    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_ALL, "%s=0x%08X", "RecMonModes added count", (int)monAdded);
+    TraceEvents(TRACE_LEVEL_VERBOSE, DBG_ALL, "%s=0x%08X", "RecMonModes added count", (int)monAdded);
     return STATUS_SUCCESS;
 }
 
