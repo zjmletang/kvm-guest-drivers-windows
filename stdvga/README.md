@@ -7,7 +7,7 @@ Windows UEFI guests using the default Microsoft Basic Display Adapter are stuck 
 ## Features
 
 - Runtime resolution switching via Windows Display Settings, `Set-DisplayResolution`, or `stdvgares.exe`
-- 15 supported resolutions: 800x600, 1024x768, 1152x864, 1280x720, 1280x768, 1280x800, 1280x960, 1280x1024, 1400x1050, 1440x900, 1600x1200, 1680x1050, 1920x1080 (default), 1920x1200, 2560x1600
+- 15 supported resolutions: 800x600 (default), 1024x768, 1152x864, 1280x720, 1280x768, 1280x800, 1280x960, 1280x1024, 1400x1050, 1440x900, 1600x1200, 1680x1050, 1920x1080, 1920x1200, 2560x1600
 - Single Universal x64 package covering Windows 10 (1709+) / 11 and Windows Server 2019 / 2022 / 2025
 
 ## Installation

@@ -100,11 +100,11 @@ extern "C"
 #define STDVGA_BYTES_PER_PIXEL           4
 
 //
-// Default resolution used whenever the driver cannot determine (or does not
-// trust) the resolution left behind by firmware/BIOS, e.g. at StartDevice.
+// Conservative default resolution programmed at StartDevice. Users can select
+// larger modes later through Windows display settings or stdvgares.exe.
 //
-#define STDVGA_DEFAULT_WIDTH             1920
-#define STDVGA_DEFAULT_HEIGHT            1080
+#define STDVGA_DEFAULT_WIDTH             800
+#define STDVGA_DEFAULT_HEIGHT            600
 
 //
 // Mode definition
