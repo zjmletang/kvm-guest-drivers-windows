@@ -40,6 +40,47 @@
 /* The feature bitmap for virtio balloon */
 #define VIRTIO_BALLOON_F_MUST_TELL_HOST 0 /* Tell before reclaiming pages */
 #define VIRTIO_BALLOON_F_STATS_VQ       1 /* Memory status virtqueue */
+#define VIRTIO_BALLOON_F_PAGE_REPORTING 5 /* Free page reporting virtqueue */
+
+/*
+ * Free page reporting (VIRTIO_BALLOON_F_PAGE_REPORTING) tuning parameters.
+ *
+ * Reported blocks are always 2MB in size and 2MB-aligned. This matches the
+ * host-side transparent huge page granularity and the default reporting
+ * granularity of the Linux free page reporting implementation, which only
+ * reports blocks of pageblock_order and larger (order 9, i.e. 2MB, on
+ * architectures with 4KB base pages). The virtio specification requires
+ * the driver to "attempt to report large pages rather than smaller ones".
+ *
+ * The alignment is provided by MmAllocatePagesForMdlEx called with
+ * MM_ALLOCATE_REQUIRE_CONTIGUOUS_CHUNKS and SkipBytes = 2MB: the memory
+ * manager returns complete 2MB blocks, each guaranteed to be exactly 2MB
+ * long and aligned on a 2MB boundary, preferably taken from the system's
+ * large page cache.
+ */
+#define REPORTING_BLOCK_SHIFT           9                              /* log2(512) */
+#define REPORTING_BLOCK_PAGES           (1UL << REPORTING_BLOCK_SHIFT) /* 4KB pages per 2MB block */
+#define REPORTING_BLOCK_SIZE            (REPORTING_BLOCK_PAGES << PAGE_SHIFT)
+
+/* Total size of a single MmAllocatePagesForMdlEx call, a multiple of the
+ * 2MB reporting block size (32 blocks per allocation) */
+#define REPORTING_BATCH_BYTES           (32 * REPORTING_BLOCK_SIZE)
+/* Max number of allocation batches per reporting cycle */
+#define REPORTING_BATCHES_PER_CYCLE     8
+/* Max number of 2MB blocks reported per virtqueue request (QEMU vring size) */
+#define REPORTING_MAX_SEGMENTS          32
+/* Reporting cycle interval, matches Linux page_reporting_delay_ms default */
+#define REPORTING_INTERVAL_MS           2000
+
+/*
+ * Watermarks (in 4KB pages) controlling when pages are taken from and
+ * returned to the guest. Pages are only allocated while at least an
+ * eighth of the physical RAM (but never less than 256MB) remains
+ * available to the guest. Once half of that amount is left, held pages
+ * are handed back.
+ */
+#define REPORTING_AVAILABLE_FRACTION    8
+#define REPORTING_MIN_AVAILABLE_PAGES   (256UL * 1024 * 1024 / PAGE_SIZE)
 
 typedef struct _VIRTIO_BALLOON_CONFIG
 {
@@ -73,6 +114,7 @@ typedef struct _DEVICE_CONTEXT
     PVIOQUEUE InfVirtQueue;
     PVIOQUEUE DefVirtQueue;
     PVIOQUEUE StatVirtQueue;
+    PVIOQUEUE RepVirtQueue;
 
     WDFSPINLOCK StatQueueLock;
     WDFSPINLOCK InfDefQueueLock;
@@ -86,6 +128,19 @@ typedef struct _DEVICE_CONTEXT
     BOOLEAN bListInitialized;
     SINGLE_LIST_ENTRY PageListHead;
     PBALLOON_STAT MemStats;
+
+    /*
+     * Free page reporting state. The held MDL list is only accessed from
+     * the balloon worker thread (reporting) and, after that thread has
+     * been stopped, from the power-management path (release), so it needs
+     * no additional lock. The reporting virtqueue itself is protected by
+     * InfDefQueueLock, like the inflate and deflate queues.
+     */
+    ULONG ReportingTotalPages;          /* NumberOfPhysicalPages, cached */
+    SINGLE_LIST_ENTRY ReportingMdlList; /* held PAGE_LIST_ENTRY chain */
+    ULONG ReportingMdlCount;
+    ULONG ReportingHeldPages;     /* pages currently held */
+    ULONG ReportingReportedPages; /* pages reported so far (cumulative) */
 
     KEVENT WakeUpThread;
     PKTHREAD Thread;
@@ -162,6 +217,14 @@ VOID BalloonMemStats(IN WDFOBJECT WdfDevice);
 NTSTATUS
 BalloonTellHost(IN WDFOBJECT WdfDevice, IN PVIOQUEUE vq);
 
+/* Free page reporting (VIRTIO_BALLOON_F_PAGE_REPORTING) routines */
+NTSTATUS
+BalloonReportInitialize(IN WDFDEVICE Device);
+
+VOID BalloonReportStep(IN WDFOBJECT WdfDevice);
+
+VOID BalloonReportReleaseAll(IN WDFOBJECT WdfDevice);
+
 __inline VOID EnableInterrupt(IN WDFINTERRUPT WdfInterrupt, IN WDFCONTEXT Context)
 {
     PDEVICE_CONTEXT devCtx = (PDEVICE_CONTEXT)Context;
@@ -177,6 +240,12 @@ __inline VOID EnableInterrupt(IN WDFINTERRUPT WdfInterrupt, IN WDFCONTEXT Contex
         virtqueue_enable_cb(devCtx->StatVirtQueue);
         virtqueue_kick(devCtx->StatVirtQueue);
     }
+
+    if (devCtx->RepVirtQueue)
+    {
+        virtqueue_enable_cb(devCtx->RepVirtQueue);
+        virtqueue_kick(devCtx->RepVirtQueue);
+    }
 }
 
 __inline VOID DisableInterrupt(IN PDEVICE_CONTEXT devCtx)
@@ -186,6 +255,10 @@ __inline VOID DisableInterrupt(IN PDEVICE_CONTEXT devCtx)
     if (devCtx->StatVirtQueue)
     {
         virtqueue_disable_cb(devCtx->StatVirtQueue);
+    }
+    if (devCtx->RepVirtQueue)
+    {
+        virtqueue_disable_cb(devCtx->RepVirtQueue);
     }
 }
 

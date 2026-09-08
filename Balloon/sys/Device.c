@@ -401,6 +401,16 @@ BalloonEvtDeviceD0Entry(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE PreviousS
         goto Terminate;
     }
 
+    if (devCtx->RepVirtQueue != NULL)
+    {
+        status = BalloonReportInitialize(Device);
+        if (!NT_SUCCESS(status))
+        {
+            /* disable free page reporting, the balloon still works */
+            devCtx->RepVirtQueue = NULL;
+        }
+    }
+
 #ifndef BALLOON_INFLATE_IGNORE_LOWMEM
     devCtx->evLowMem = IoCreateNotificationEvent((PUNICODE_STRING)&evLowMemString, &devCtx->hLowMem);
 #endif // !BALLOON_INFLATE_IGNORE_LOWMEM
@@ -435,14 +445,15 @@ BalloonEvtDeviceD0Exit(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE TargetStat
 
     BalloonCloseWorkerThread(Device);
 
-#ifndef USE_BALLOON_SERVICE
     /*
      * interrupts were already disabled (between BalloonEvtDeviceD0ExitPreInterruptsDisabled and this call)
      * we should flush StatWorkItem before calling BalloonTerm which will delete virtio queues
      */
+#ifndef USE_BALLOON_SERVICE
     WdfWorkItemFlush(devCtx->StatWorkItem);
 #endif // !USE_BALLOON_SERVICE
 
+    BalloonReportReleaseAll(Device);
     BalloonTerm(Device);
 
     return STATUS_SUCCESS;
@@ -458,6 +469,10 @@ BalloonEvtDeviceD0ExitPreInterruptsDisabled(IN WDFDEVICE Device, IN WDF_POWER_DE
     PAGED_CODE();
 
     BalloonCloseWorkerThread(Device);
+
+    /* the worker thread is gone, return the reported pages to the guest */
+    BalloonReportReleaseAll(Device);
+
     if (TargetState == WdfPowerDeviceD3Final)
     {
         while (devCtx->num_pages)
@@ -522,6 +537,10 @@ VOID BalloonInterruptDpc(IN WDFINTERRUPT WdfInterrupt, IN WDFOBJECT WdfDevice)
         bHostAck = TRUE;
     }
     if (virtqueue_get_buf(devCtx->DefVirtQueue, &len))
+    {
+        bHostAck = TRUE;
+    }
+    if (devCtx->RepVirtQueue != NULL && virtqueue_get_buf(devCtx->RepVirtQueue, &len))
     {
         bHostAck = TRUE;
     }
@@ -672,7 +691,18 @@ VOID BalloonRoutine(IN PVOID pContext)
 
     for (;;)
     {
-        status = KeWaitForSingleObject(&devCtx->WakeUpThread, Executive, KernelMode, FALSE, NULL);
+        LARGE_INTEGER reportingTimeout = {0};
+        PLARGE_INTEGER timeout = NULL;
+
+        /* with free page reporting the thread also runs a periodic
+         * reporting cycle, otherwise wait indefinitely */
+        if (devCtx->RepVirtQueue != NULL)
+        {
+            reportingTimeout.QuadPart = Int32x32To64(REPORTING_INTERVAL_MS, -10000);
+            timeout = &reportingTimeout;
+        }
+
+        status = KeWaitForSingleObject(&devCtx->WakeUpThread, Executive, KernelMode, FALSE, timeout);
         if (STATUS_WAIT_0 == status)
         {
             if (devCtx->bShutDown)
@@ -704,6 +734,10 @@ VOID BalloonRoutine(IN PVOID pContext)
 
                 BalloonSetSize(Device, devCtx->num_pages);
             }
+        }
+        else if (STATUS_TIMEOUT == status)
+        {
+            BalloonReportStep(Device);
         }
     }
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_PNP, "Thread about to exit...\n");
