@@ -148,6 +148,17 @@ typedef struct _DEVICE_CONTEXT
     ULONG ReportingHeldPages;     /* pages currently held */
     ULONG ReportingReportedPages; /* pages reported so far (cumulative) */
 
+#ifndef BALLOON_INFLATE_IGNORE_LOWMEM
+    /*
+     * Dedicated watch thread that turns the LowMemoryCondition kernel
+     * event into an immediate wake-up for the worker thread, cutting the
+     * reaction time from the reporting cycle interval down to the event
+     * signal itself. Only present when free page reporting is active.
+     */
+    KEVENT WatchStopEvent; /* synchronization event, set on shutdown */
+    PKTHREAD LowMemWatchThread;
+#endif // !BALLOON_INFLATE_IGNORE_LOWMEM
+
     KEVENT WakeUpThread;
     PKTHREAD Thread;
     BOOLEAN bShutDown;
@@ -232,6 +243,16 @@ BalloonReportInitialize(IN WDFDEVICE Device);
 VOID BalloonReportStep(IN WDFOBJECT WdfDevice);
 
 VOID BalloonReportReleaseAll(IN WDFOBJECT WdfDevice);
+
+#ifndef BALLOON_INFLATE_IGNORE_LOWMEM
+KSTART_ROUTINE BalloonReportLowMemWatchRoutine;
+
+NTSTATUS
+BalloonReportCreateLowMemWatch(IN WDFDEVICE Device);
+
+NTSTATUS
+BalloonReportCloseLowMemWatch(IN WDFDEVICE Device);
+#endif // !BALLOON_INFLATE_IGNORE_LOWMEM
 
 __inline VOID EnableInterrupt(IN WDFINTERRUPT WdfInterrupt, IN WDFCONTEXT Context)
 {

@@ -66,6 +66,14 @@
  * parameters), clamped to [64MB, RAM/2]. The release logic itself
  * (LowMemoryCondition handling, hysteresis band, gradual release) is
  * deliberately not configurable.
+ *
+ * Note on commit charge: the held pages are committed and pinned, so they
+ * consume commit charge as well as physical memory. With no pagefile the
+ * available-memory watermark implies commit protection (every available
+ * page is uncommitted), and with a system-managed pagefile the memory
+ * manager grows the commit limit under pressure; deployments with a small
+ * fixed-size pagefile and heavily reserved (committed-but-untouched)
+ * workloads should size the pagefile accordingly.
  */
 
 #include "precomp.h"
@@ -513,3 +521,116 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
 
     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_REPORTING, "<-- %s\n", __FUNCTION__);
 }
+
+#ifndef BALLOON_INFLATE_IGNORE_LOWMEM
+/*
+ * Dedicated watch thread for the LowMemoryCondition kernel event. The
+ * memory manager signals the event the moment the system enters a low
+ * memory state; instead of waiting for the next reporting cycle, the
+ * thread wakes the balloon worker immediately so that it can hand the
+ * held pages back. The event stays signaled for as long as the condition
+ * holds, so while it is signaled the thread re-checks its state at a
+ * fixed interval instead of busy waiting. The worker's periodic check
+ * remains the fallback if the thread cannot be created.
+ */
+VOID BalloonReportLowMemWatchRoutine(IN PVOID pContext)
+{
+    WDFOBJECT Device = (WDFOBJECT)pContext;
+    PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);
+    PVOID waitObjects[2];
+    LARGE_INTEGER oneSecond;
+    LARGE_INTEGER zeroTimeout;
+
+    oneSecond.QuadPart = -10000; /* 1s, relative */
+    zeroTimeout.QuadPart = 0;
+
+    waitObjects[0] = devCtx->evLowMem;
+    waitObjects[1] = &devCtx->WatchStopEvent;
+
+    for (;;)
+    {
+        NTSTATUS status = KeWaitForMultipleObjects(2, waitObjects, WaitAny, Executive, KernelMode, FALSE, NULL, NULL);
+
+        if (status != STATUS_WAIT_0 || devCtx->bShutDown)
+        {
+            break; /* stop event signaled or shutdown */
+        }
+
+        /* low memory condition: wake the worker, it releases the pages */
+        KeSetEvent(&devCtx->WakeUpThread, EVENT_INCREMENT, FALSE);
+
+        while (devCtx->bShutDown == FALSE &&
+               KeWaitForSingleObject(devCtx->evLowMem, Executive, KernelMode, FALSE, &zeroTimeout) == STATUS_WAIT_0)
+        {
+            KeDelayExecutionThread(KernelMode, FALSE, &oneSecond);
+        }
+    }
+
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_REPORTING, "Low memory watch thread exiting\n");
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+NTSTATUS BalloonReportCreateLowMemWatch(IN WDFDEVICE Device)
+{
+    PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);
+    NTSTATUS status;
+    HANDLE hThread = 0;
+    OBJECT_ATTRIBUTES oa;
+
+    if (devCtx->LowMemWatchThread != NULL)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    status = PsCreateSystemThread(&hThread,
+                                  THREAD_ALL_ACCESS,
+                                  &oa,
+                                  NULL,
+                                  NULL,
+                                  BalloonReportLowMemWatchRoutine,
+                                  Device);
+    if (!NT_SUCCESS(status))
+    {
+        TraceEvents(TRACE_LEVEL_ERROR,
+                    DBG_REPORTING,
+                    "Failed to create the low memory watch thread, status 0x%08x\n",
+                    status);
+        return status;
+    }
+
+    status = ObReferenceObjectByHandle(hThread,
+                                       THREAD_ALL_ACCESS,
+                                       NULL,
+                                       KernelMode,
+                                       (PVOID *)&devCtx->LowMemWatchThread,
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        TraceEvents(TRACE_LEVEL_ERROR, DBG_REPORTING, "Failed to reference the watch thread, status 0x%08x\n", status);
+        KeSetEvent(&devCtx->WatchStopEvent, EVENT_INCREMENT, FALSE);
+        ZwWaitForSingleObject(hThread, FALSE, NULL);
+    }
+    ZwClose(hThread);
+    return status;
+}
+
+NTSTATUS BalloonReportCloseLowMemWatch(IN WDFDEVICE Device)
+{
+    PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (devCtx->LowMemWatchThread != NULL)
+    {
+        KeSetEvent(&devCtx->WatchStopEvent, EVENT_INCREMENT, FALSE);
+        status = KeWaitForSingleObject(devCtx->LowMemWatchThread, Executive, KernelMode, FALSE, NULL);
+        if (!NT_SUCCESS(status))
+        {
+            TraceEvents(TRACE_LEVEL_ERROR, DBG_REPORTING, "Watch thread join failed, status 0x%08x\n", status);
+        }
+        ObDereferenceObject(devCtx->LowMemWatchThread);
+        devCtx->LowMemWatchThread = NULL;
+    }
+    return status;
+}
+#endif // !BALLOON_INFLATE_IGNORE_LOWMEM

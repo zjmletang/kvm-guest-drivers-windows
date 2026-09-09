@@ -413,6 +413,25 @@ BalloonEvtDeviceD0Entry(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE PreviousS
 
 #ifndef BALLOON_INFLATE_IGNORE_LOWMEM
     devCtx->evLowMem = IoCreateNotificationEvent((PUNICODE_STRING)&evLowMemString, &devCtx->hLowMem);
+
+    /*
+     * With free page reporting active, watch the low memory condition and
+     * wake the worker thread immediately. Best effort only: the periodic
+     * check inside the worker remains the fallback if the thread cannot
+     * be created.
+     */
+    if (devCtx->RepVirtQueue != NULL && devCtx->evLowMem != NULL)
+    {
+        KeInitializeEvent(&devCtx->WatchStopEvent, SynchronizationEvent, FALSE);
+        status = BalloonReportCreateLowMemWatch(Device);
+        if (!NT_SUCCESS(status))
+        {
+            TraceEvents(TRACE_LEVEL_WARNING,
+                        DBG_PNP,
+                        "BalloonReportCreateLowMemWatch failed with status 0x%08x\n",
+                        status);
+        }
+    }
 #endif // !BALLOON_INFLATE_IGNORE_LOWMEM
 
 Terminate:
@@ -436,6 +455,10 @@ BalloonEvtDeviceD0Exit(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE TargetStat
     PAGED_CODE();
 
 #ifndef BALLOON_INFLATE_IGNORE_LOWMEM
+    /* the watch thread waits on the low memory event object, stop it
+     * before the event handle is closed */
+    BalloonReportCloseLowMemWatch(Device);
+
     if (devCtx->evLowMem)
     {
         ZwClose(devCtx->hLowMem);
@@ -467,6 +490,10 @@ BalloonEvtDeviceD0ExitPreInterruptsDisabled(IN WDFDEVICE Device, IN WDF_POWER_DE
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INIT, "<--> %s\n", __FUNCTION__);
 
     PAGED_CODE();
+
+#ifndef BALLOON_INFLATE_IGNORE_LOWMEM
+    BalloonReportCloseLowMemWatch(Device);
+#endif // !BALLOON_INFLATE_IGNORE_LOWMEM
 
     BalloonCloseWorkerThread(Device);
 
@@ -734,6 +761,19 @@ VOID BalloonRoutine(IN PVOID pContext)
 
                 BalloonSetSize(Device, devCtx->num_pages);
             }
+
+#ifndef BALLOON_INFLATE_IGNORE_LOWMEM
+            /*
+             * The watch thread may have woken us for a low memory
+             * condition: release the pages without waiting for the next
+             * reporting cycle. The state check is a zero-timeout wait,
+             * cheap enough for the interrupt-driven wake-up path.
+             */
+            if (devCtx->RepVirtQueue != NULL && IsLowMemory(Device))
+            {
+                BalloonReportStep(Device);
+            }
+#endif // !BALLOON_INFLATE_IGNORE_LOWMEM
         }
         else if (STATUS_TIMEOUT == status)
         {

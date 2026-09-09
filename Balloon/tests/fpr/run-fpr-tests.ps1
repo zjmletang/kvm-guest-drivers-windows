@@ -5,7 +5,7 @@ param(
     [string]$BareMetal = "47.83.225.42",
     [string]$VmName = "fpr_upstream",
     [string]$GuestIp = "192.168.122.6",
-    [string]$ExpectedDriverVersion = "100.6.101.58300",
+    [string]$ExpectedDriverVersion = "100.6.101.58500",
     [int]$VmMemMb = 4096,
     [int]$StressMb = 1500,
     [switch]$IncludeReboot,
