@@ -68,12 +68,12 @@
  * deliberately not configurable.
  *
  * Note on commit charge: the held pages are committed and pinned, so they
- * consume commit charge as well as physical memory. With no pagefile the
- * available-memory watermark implies commit protection (every available
- * page is uncommitted), and with a system-managed pagefile the memory
- * manager grows the commit limit under pressure; deployments with a small
- * fixed-size pagefile and heavily reserved (committed-but-untouched)
- * workloads should size the pagefile accordingly.
+ * consume commit charge as well as physical memory. Commitment does not
+ * occupy physical pages until first access (demand zero), so the physical
+ * watermark alone says nothing about the remaining commit limit - the
+ * reporting cycle therefore also hands pages back once the remaining
+ * commit limit (RAM + pagefile - committed) runs low. A system-managed
+ * pagefile absorbs most commit pressure by growing on its own.
  */
 
 #include "precomp.h"
@@ -87,7 +87,9 @@
 #pragma alloc_text(PAGE, BalloonReportInitialize)
 #endif // ALLOC_PRAGMA
 
-static NTSTATUS ReportingQueryAvailablePages(OUT PULONG AvailablePages)
+static NTSTATUS ReportingQueryMemoryState(OUT PULONG AvailablePages,
+                                          OUT PULONG CommitHeadroomPages,
+                                          OUT PULONG CommitLimitPages)
 {
     SYSTEM_PERFORMANCE_INFORMATION perfInfo;
     ULONG outLen = 0;
@@ -98,8 +100,38 @@ static NTSTATUS ReportingQueryAvailablePages(OUT PULONG AvailablePages)
     if (NT_SUCCESS(status))
     {
         *AvailablePages = perfInfo.AvailablePages;
+        *CommitLimitPages = perfInfo.CommitLimit;
+        *CommitHeadroomPages = (perfInfo.CommitLimit > perfInfo.CommittedPages) ? (perfInfo.CommitLimit -
+                                                                                   perfInfo.CommittedPages)
+                                                                                : 0;
     }
     return status;
+}
+
+/*
+ * The held pages are committed and pinned, so they consume commit charge as
+ * well as physical memory. Commitment does not occupy physical pages until
+ * first access (demand zero), so the available-memory watermark says nothing
+ * about the remaining commit limit: workloads that reserve a lot of memory
+ * without touching it can leave plenty of available pages while the commit
+ * limit is nearly exhausted. Hand pages back before the held charge can eat
+ * into that last reserve - built-in, deliberately not configurable.
+ */
+static __inline BOOLEAN ReportingCommitHeadroomLow(IN ULONG CommitHeadroomPages, IN ULONG CommitLimitPages)
+{
+    ULONG threshold;
+
+    if (CommitLimitPages == 0)
+    {
+        return FALSE;
+    }
+
+    threshold = CommitLimitPages / REPORTING_COMMIT_HEADROOM_FRACTION;
+    if (threshold < REPORTING_MIN_COMMIT_HEADROOM_PAGES)
+    {
+        threshold = REPORTING_MIN_COMMIT_HEADROOM_PAGES;
+    }
+    return CommitHeadroomPages < threshold;
 }
 
 static ULONG ReportingAllocWatermark(IN PDEVICE_CONTEXT devCtx)
@@ -395,6 +427,8 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
 {
     PDEVICE_CONTEXT devCtx = GetDeviceContext(WdfDevice);
     ULONG availablePages = 0;
+    ULONG commitHeadroomPages = 0;
+    ULONG commitLimitPages = 0;
     ULONG allocWatermark;
     ULONG batches = 0;
     VIO_SG segments[REPORTING_MAX_SEGMENTS];
@@ -407,7 +441,7 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
         return;
     }
 
-    if (!NT_SUCCESS(ReportingQueryAvailablePages(&availablePages)))
+    if (!NT_SUCCESS(ReportingQueryMemoryState(&availablePages, &commitHeadroomPages, &commitLimitPages)))
     {
         return;
     }
@@ -425,6 +459,17 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
         return;
     }
 #endif // !BALLOON_INFLATE_IGNORE_LOWMEM
+
+    if (devCtx->ReportingMdlCount != 0 && ReportingCommitHeadroomLow(commitHeadroomPages, commitLimitPages))
+    {
+        TraceEvents(TRACE_LEVEL_WARNING,
+                    DBG_REPORTING,
+                    "Commit headroom low (%d of %d pages), releasing half of the held pages\n",
+                    commitHeadroomPages,
+                    commitLimitPages);
+        ReportingReleasePages(devCtx, devCtx->ReportingMdlCount / 2 + 1);
+        return;
+    }
 
     if (devCtx->ReportingMdlCount != 0 && availablePages < allocWatermark / 2)
     {
@@ -449,8 +494,9 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
         PPAGE_LIST_ENTRY pageListEntry;
         PMDL mdl;
 
-        /* re-check the available memory while filling up */
-        if (!NT_SUCCESS(ReportingQueryAvailablePages(&availablePages)) || availablePages <= allocWatermark)
+        /* re-check the available memory and commit headroom while filling up */
+        if (!NT_SUCCESS(ReportingQueryMemoryState(&availablePages, &commitHeadroomPages, &commitLimitPages)) ||
+            availablePages <= allocWatermark || ReportingCommitHeadroomLow(commitHeadroomPages, commitLimitPages))
         {
             break;
         }

@@ -35,12 +35,12 @@
 #include "trace.h"
 
 /* The ID for virtio_balloon */
-#define VIRTIO_ID_BALLOON                  5
+#define VIRTIO_ID_BALLOON                   5
 
 /* The feature bitmap for virtio balloon */
-#define VIRTIO_BALLOON_F_MUST_TELL_HOST    0 /* Tell before reclaiming pages */
-#define VIRTIO_BALLOON_F_STATS_VQ          1 /* Memory status virtqueue */
-#define VIRTIO_BALLOON_F_PAGE_REPORTING    5 /* Free page reporting virtqueue */
+#define VIRTIO_BALLOON_F_MUST_TELL_HOST     0 /* Tell before reclaiming pages */
+#define VIRTIO_BALLOON_F_STATS_VQ           1 /* Memory status virtqueue */
+#define VIRTIO_BALLOON_F_PAGE_REPORTING     5 /* Free page reporting virtqueue */
 
 /*
  * Free page reporting (VIRTIO_BALLOON_F_PAGE_REPORTING) tuning parameters.
@@ -58,19 +58,19 @@
  * long and aligned on a 2MB boundary, preferably taken from the system's
  * large page cache.
  */
-#define REPORTING_BLOCK_SHIFT              9                              /* log2(512) */
-#define REPORTING_BLOCK_PAGES              (1UL << REPORTING_BLOCK_SHIFT) /* 4KB pages per 2MB block */
-#define REPORTING_BLOCK_SIZE               (REPORTING_BLOCK_PAGES << PAGE_SHIFT)
+#define REPORTING_BLOCK_SHIFT               9                              /* log2(512) */
+#define REPORTING_BLOCK_PAGES               (1UL << REPORTING_BLOCK_SHIFT) /* 4KB pages per 2MB block */
+#define REPORTING_BLOCK_SIZE                (REPORTING_BLOCK_PAGES << PAGE_SHIFT)
 
 /* Total size of a single MmAllocatePagesForMdlEx call, a multiple of the
  * 2MB reporting block size (32 blocks per allocation) */
-#define REPORTING_BATCH_BYTES              (32 * REPORTING_BLOCK_SIZE)
+#define REPORTING_BATCH_BYTES               (32 * REPORTING_BLOCK_SIZE)
 /* Max number of allocation batches per reporting cycle */
-#define REPORTING_BATCHES_PER_CYCLE        8
+#define REPORTING_BATCHES_PER_CYCLE         8
 /* Max number of 2MB blocks reported per virtqueue request (QEMU vring size) */
-#define REPORTING_MAX_SEGMENTS             32
+#define REPORTING_MAX_SEGMENTS              32
 /* Reporting cycle interval, matches Linux page_reporting_delay_ms default */
-#define REPORTING_INTERVAL_MS              2000
+#define REPORTING_INTERVAL_MS               2000
 
 /*
  * Watermarks (in 4KB pages) controlling when pages are taken from and
@@ -83,9 +83,21 @@
  * module parameters. The mechanism itself (LowMemoryCondition handling,
  * hysteresis band, gradual release) is not configurable.
  */
-#define REPORTING_AVAILABLE_FRACTION       8
-#define REPORTING_MIN_AVAILABLE_PAGES      (256UL * 1024 * 1024 / PAGE_SIZE)
-#define REPORTING_HARD_MIN_AVAILABLE_PAGES (64UL * 1024 * 1024 / PAGE_SIZE)
+#define REPORTING_AVAILABLE_FRACTION        8
+#define REPORTING_MIN_AVAILABLE_PAGES       (256UL * 1024 * 1024 / PAGE_SIZE)
+#define REPORTING_HARD_MIN_AVAILABLE_PAGES  (64UL * 1024 * 1024 / PAGE_SIZE)
+
+/*
+ * Commit headroom protection (built-in, not configurable): the held pages
+ * consume commit charge, and commitment does not occupy physical pages
+ * until first access, so the available-memory watermark alone cannot
+ * prevent the held charge from eating into the last commit reserve of
+ * workloads that reserve a lot of memory without touching it. Pages are
+ * handed back once the remaining commit limit (RAM + pagefile - committed)
+ * drops below a tenth of the commit limit, but never less than 128MB.
+ */
+#define REPORTING_COMMIT_HEADROOM_FRACTION  10
+#define REPORTING_MIN_COMMIT_HEADROOM_PAGES (128UL * 1024 * 1024 / PAGE_SIZE)
 
 typedef struct _VIRTIO_BALLOON_CONFIG
 {
