@@ -59,6 +59,13 @@
  *
  * Held pages are returned to the guest when the system signals a low
  * memory condition or when the available memory falls below a watermark.
+ *
+ * The watermark defaults to max(RAM/8, 256MB) and can be overridden per
+ * deployment with MinFreeMb in the driver service Parameters registry
+ * key (the Windows counterpart of the Linux page_reporting module
+ * parameters), clamped to [64MB, RAM/2]. The release logic itself
+ * (LowMemoryCondition handling, hysteresis band, gradual release) is
+ * deliberately not configurable.
  */
 
 #include "precomp.h"
@@ -89,6 +96,11 @@ static NTSTATUS ReportingQueryAvailablePages(OUT PULONG AvailablePages)
 
 static ULONG ReportingAllocWatermark(IN PDEVICE_CONTEXT devCtx)
 {
+    if (devCtx->ReportingMinFreePages != 0)
+    {
+        return devCtx->ReportingMinFreePages;
+    }
+
     ULONG watermark = devCtx->ReportingTotalPages / REPORTING_AVAILABLE_FRACTION;
 
     if (watermark < REPORTING_MIN_AVAILABLE_PAGES)
@@ -255,6 +267,73 @@ static BOOLEAN ReportingFlushSegments(IN PDEVICE_CONTEXT devCtx, IN PVIO_SG Segm
     return FALSE;
 }
 
+/*
+ * Reads the optional EnableFpr value from the driver service Parameters
+ * registry key. 1 (default) negotiates VIRTIO_BALLOON_F_PAGE_REPORTING
+ * whenever the device offers it and no IOMMU is in the way, 0 keeps the
+ * driver to the traditional balloon behavior - an escape hatch for
+ * deployments that want free page reporting off without touching the
+ * host-side device configuration.
+ */
+BOOLEAN ReportingIsEnabled(IN WDFDEVICE Device)
+{
+    DECLARE_CONST_UNICODE_STRING(valueName, L"EnableFpr");
+    WDFKEY parametersKey = NULL;
+    ULONG enable = 1;
+
+    if (NT_SUCCESS(WdfDriverOpenParametersRegistryKey(WdfDeviceGetDriver(Device),
+                                                      KEY_READ,
+                                                      WDF_NO_OBJECT_ATTRIBUTES,
+                                                      &parametersKey)))
+    {
+        WdfRegistryQueryULong(parametersKey, &valueName, &enable);
+        WdfObjectDelete(parametersKey);
+    }
+    return enable != 0;
+}
+
+/*
+ * Reads the optional MinFreeMb value from the driver service Parameters
+ * registry key and converts it to the watermark override in pages, clamped
+ * to [64MB, RAM/2]. A missing or zero value keeps the automatic default.
+ */
+static VOID ReportingReadWatermarkOverride(IN WDFDEVICE Device, IN PDEVICE_CONTEXT devCtx)
+{
+    DECLARE_CONST_UNICODE_STRING(valueName, L"MinFreeMb");
+    WDFKEY parametersKey = NULL;
+    ULONG minFreeMb = 0;
+
+    devCtx->ReportingMinFreePages = 0;
+
+    if (NT_SUCCESS(WdfDriverOpenParametersRegistryKey(WdfDeviceGetDriver(Device),
+                                                      KEY_READ,
+                                                      WDF_NO_OBJECT_ATTRIBUTES,
+                                                      &parametersKey)))
+    {
+        if (NT_SUCCESS(WdfRegistryQueryULong(parametersKey, &valueName, &minFreeMb)) && minFreeMb != 0)
+        {
+            ULONGLONG pages = (ULONGLONG)minFreeMb * 1024 * 1024 / PAGE_SIZE;
+
+            if (pages < REPORTING_HARD_MIN_AVAILABLE_PAGES)
+            {
+                pages = REPORTING_HARD_MIN_AVAILABLE_PAGES;
+            }
+            if (devCtx->ReportingTotalPages != 0 && pages > devCtx->ReportingTotalPages / 2)
+            {
+                pages = devCtx->ReportingTotalPages / 2;
+            }
+            devCtx->ReportingMinFreePages = (ULONG)pages;
+
+            TraceEvents(TRACE_LEVEL_INFORMATION,
+                        DBG_REPORTING,
+                        "MinFreeMb=%u override, watermark %u pages\n",
+                        minFreeMb,
+                        devCtx->ReportingMinFreePages);
+        }
+        WdfObjectDelete(parametersKey);
+    }
+}
+
 NTSTATUS
 BalloonReportInitialize(IN WDFDEVICE Device)
 {
@@ -277,6 +356,8 @@ BalloonReportInitialize(IN WDFDEVICE Device)
         basicInfo.NumberOfPhysicalPages = 0;
     }
     devCtx->ReportingTotalPages = basicInfo.NumberOfPhysicalPages;
+
+    ReportingReadWatermarkOverride(Device, devCtx);
 
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_REPORTING, "<-- %s\n", __FUNCTION__);
     return STATUS_SUCCESS;

@@ -81,9 +81,11 @@ BalloonInit(IN WDFOBJECT WdfDevice)
     /*
      * The reported pages are described by their physical addresses and
      * are never mapped, free page reporting therefore requires identity
-     * DMA and is not supported behind an IOMMU.
+     * DMA and is not supported behind an IOMMU. The EnableFpr service
+     * parameter can keep the feature off regardless (escape hatch).
      */
-    if (virtio_is_feature_enabled(u64HostFeatures, VIRTIO_BALLOON_F_PAGE_REPORTING) && !devCtx->VDevice.IsIoMmuActive)
+    if (virtio_is_feature_enabled(u64HostFeatures, VIRTIO_BALLOON_F_PAGE_REPORTING) &&
+        ReportingIsEnabled((WDFDEVICE)WdfDevice) && !devCtx->VDevice.IsIoMmuActive)
     {
         TraceEvents(TRACE_LEVEL_INFORMATION, DBG_PNP, "Enable free page reporting feature.\n");
 

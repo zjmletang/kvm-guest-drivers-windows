@@ -68,7 +68,16 @@ ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
 StartType      = 3               ; SERVICE_DEMAND_START 
 ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
 ServiceBinary  = %INX_PLATFORM_DRIVERS_DIR%\balloon.sys
-AddReg         = Dmar.AddReg
+AddReg         = Dmar.AddReg, BalloonParams.AddReg
+
+[BalloonParams.AddReg]
+; Free page reporting enable switch. 1 (default) = negotiate
+; VIRTIO_BALLOON_F_PAGE_REPORTING when the device offers it (escape hatch:
+; set to 0 to keep the driver to the traditional balloon behavior).
+; Free page reporting watermark override, in MB.
+; 0 (default) = automatic: keep at least max(RAM/8, 256MB) available to the guest.
+HKR,Parameters,EnableFpr,0x00010001,1
+HKR,Parameters,MinFreeMb,0x00010001,0
 
 [Dmar.AddReg]
 HKR,Parameters,DmaRemappingCompatible,0x00010001,2
