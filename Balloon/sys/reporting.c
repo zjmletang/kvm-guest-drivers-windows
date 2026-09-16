@@ -399,6 +399,15 @@ BalloonReportInitialize(IN WDFDEVICE Device)
 
     ReportingReadWatermarkOverride(Device, devCtx);
 
+    /* per-request segment limit: the negotiated reporting virtqueue size,
+     * capped by the on-stack segment array bound */
+    devCtx->ReportingMaxSegments = min(virtqueue_get_vring_size(devCtx->RepVirtQueue), REPORTING_MAX_SEGMENTS);
+    TraceEvents(TRACE_LEVEL_INFORMATION,
+                DBG_REPORTING,
+                "Reporting virtqueue size %u, per-request limit %u segments\n",
+                virtqueue_get_vring_size(devCtx->RepVirtQueue),
+                devCtx->ReportingMaxSegments);
+
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_REPORTING, "<-- %s\n", __FUNCTION__);
     return STATUS_SUCCESS;
 }
@@ -502,7 +511,7 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
         }
 
         /* flush the pending segments, the next batch produces up to
-         * REPORTING_BATCH_BYTES / REPORTING_BLOCK_SIZE more */
+         * ReportingMaxSegments more (one segment per 2MB block) */
         if (!ReportingFlushSegments(devCtx, segments, &segmentCount))
         {
             return;
@@ -517,11 +526,12 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
          * long and aligned on a 2MB boundary, preferably taken from the
          * system's large page cache. MM_DONT_ZERO_ALLOCATION keeps the
          * pages clean on the host, the cache type is irrelevant as the
-         * pages are never mapped. */
+         * pages are never mapped. The batch matches the per-request
+         * segment limit, so a full batch always fits into one request. */
         mdl = MmAllocatePagesForMdlEx(LowAddress,
                                       HighAddress,
                                       SkipBytes,
-                                      REPORTING_BATCH_BYTES,
+                                      (ULONGLONG)devCtx->ReportingMaxSegments * REPORTING_BLOCK_SIZE,
                                       MmCached,
                                       MM_DONT_ZERO_ALLOCATION | MM_ALLOCATE_REQUIRE_CONTIGUOUS_CHUNKS);
         if (mdl == NULL || MmGetMdlByteCount(mdl) == 0)

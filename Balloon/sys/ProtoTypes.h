@@ -62,12 +62,13 @@
 #define REPORTING_BLOCK_PAGES               (1UL << REPORTING_BLOCK_SHIFT) /* 4KB pages per 2MB block */
 #define REPORTING_BLOCK_SIZE                (REPORTING_BLOCK_PAGES << PAGE_SHIFT)
 
-/* Total size of a single MmAllocatePagesForMdlEx call, a multiple of the
- * 2MB reporting block size (32 blocks per allocation) */
-#define REPORTING_BATCH_BYTES               (32 * REPORTING_BLOCK_SIZE)
-/* Max number of allocation batches per reporting cycle */
+/* Allocation batches scale with the negotiated reporting virtqueue size,
+ * see BalloonReportInitialize: one batch yields at most ReportingMaxSegments
+ * 2MB blocks, so a full batch always fits into a single request.
+ * Max number of allocation batches per reporting cycle: */
 #define REPORTING_BATCHES_PER_CYCLE         8
-/* Max number of 2MB blocks reported per virtqueue request (QEMU vring size) */
+/* Upper bound of the on-stack segment array; the per-request limit is
+ * min(this, the negotiated reporting virtqueue size) */
 #define REPORTING_MAX_SEGMENTS              32
 /* Reporting cycle interval, matches Linux page_reporting_delay_ms default */
 #define REPORTING_INTERVAL_MS               2000
@@ -155,6 +156,7 @@ typedef struct _DEVICE_CONTEXT
      */
     ULONG ReportingTotalPages;          /* NumberOfPhysicalPages, cached */
     ULONG ReportingMinFreePages;        /* watermark override from MinFreeMb, 0 = automatic */
+    ULONG ReportingMaxSegments;         /* per-request limit, min(array bound, vring size) */
     SINGLE_LIST_ENTRY ReportingMdlList; /* held PAGE_LIST_ENTRY chain */
     ULONG ReportingMdlCount;
     ULONG ReportingHeldPages;     /* pages currently held */
