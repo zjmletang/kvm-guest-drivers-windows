@@ -38,6 +38,7 @@ typedef void (*proc_virtqueue_shutdown)(struct virtqueue *vq);
 struct virtqueue {
     VirtIODevice *vdev;
     unsigned int index;
+    unsigned int vring_size;
     void (*notification_cb)(struct virtqueue *vq);
     void *notification_addr;
     void *avail_va;
@@ -75,6 +76,15 @@ static inline void virtqueue_kick_always(struct virtqueue *vq)
 static inline void *virtqueue_get_buf(struct virtqueue *vq, unsigned int *len)
 {
     return vq->get_buf(vq, len);
+}
+
+/* Returns the negotiated size (number of descriptors) of the queue,
+ * the counterpart of the Linux virtqueue_get_vring_size().
+ * The size is written once at queue construction and never changes,
+ * so unlike the other queue operations this need not be serialized. */
+static inline unsigned int virtqueue_get_vring_size(const struct virtqueue *vq)
+{
+    return vq->vring_size;
 }
 
 static inline void virtqueue_disable_cb(struct virtqueue *vq)
