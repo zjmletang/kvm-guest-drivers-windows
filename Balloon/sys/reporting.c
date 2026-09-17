@@ -457,6 +457,15 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
 
     allocWatermark = ReportingAllocWatermark(devCtx);
 
+    TraceEvents(TRACE_LEVEL_VERBOSE,
+                DBG_REPORTING,
+                "State: available %lu pages, watermark %lu pages, commit headroom %lu of %lu pages, %lu pages held\n",
+                availablePages,
+                allocWatermark,
+                commitHeadroomPages,
+                commitLimitPages,
+                devCtx->ReportingHeldPages);
+
 #ifndef BALLOON_INFLATE_IGNORE_LOWMEM
     if (IsLowMemory(WdfDevice))
     {
@@ -492,6 +501,11 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
 
     if (availablePages <= allocWatermark)
     {
+        TraceEvents(TRACE_LEVEL_VERBOSE,
+                    DBG_REPORTING,
+                    "Available %lu pages <= watermark %lu pages, idle\n",
+                    availablePages,
+                    allocWatermark);
         return;
     }
 
@@ -561,6 +575,14 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
         devCtx->ReportingHeldPages += MmGetMdlByteCount(mdl) >> PAGE_SHIFT;
 
         ReportingExtractBlocks(mdl, segments, &segmentCount);
+
+        TraceEvents(TRACE_LEVEL_VERBOSE,
+                    DBG_REPORTING,
+                    "Batch %u: %u blocks, %u pending segments, %u pages held\n",
+                    batches,
+                    MmGetMdlByteCount(mdl) / REPORTING_BLOCK_SIZE,
+                    segmentCount,
+                    devCtx->ReportingHeldPages);
         batches++;
     }
 
@@ -613,12 +635,18 @@ VOID BalloonReportLowMemWatchRoutine(IN PVOID pContext)
         }
 
         /* low memory condition: wake the worker, it releases the pages */
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_REPORTING, "LowMemoryCondition set, waking the worker\n");
         KeSetEvent(&devCtx->WakeUpThread, EVENT_INCREMENT, FALSE);
 
         while (devCtx->bShutDown == FALSE &&
                KeWaitForSingleObject(devCtx->evLowMem, Executive, KernelMode, FALSE, &zeroTimeout) == STATUS_WAIT_0)
         {
             KeDelayExecutionThread(KernelMode, FALSE, &oneSecond);
+        }
+
+        if (devCtx->bShutDown == FALSE)
+        {
+            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_REPORTING, "LowMemoryCondition cleared\n");
         }
     }
 
