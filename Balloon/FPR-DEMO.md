@@ -95,6 +95,46 @@ State: available 700K pages, watermark 131K pages, ... , 0 pages held
 | 1/2/3 | `Balloon/tests/fpr/run-fpr-tests.ps1`（T2.2 / T2.7+T2.8 / T2.4），一键自动 |
 | 4 | logman（WPP GUID 08cb9471-36fb-46ee-998b-d1bfbe1c4899，level 255）→ tracepdb 生成 TMF → tracefmt 解码 |
 | 5 | commit-reserve.exe（随测试包）+ 固定 pagefile + 上述施压序列（完整脚本可提供） |
+| 全部 | **asciinema 录像：`tests/fpr/fpr-demo.cast`**（51 秒，`asciinema play fpr-demo.cast` 播放） |
+
+## 补充验证数据（响应模型实测）
+
+### 压力响应精度（1 秒采样，EXP-LOWMEM）
+
+```
+t=0    RSS 1452（available 缓冲仅 367MB）
+t=1s   RSS 2399  ← 首秒即响应（watch 事件驱动，非周期）
+t=9s   RSS 4136  ← 全量释放完成
+hold   RSS 3948 稳定（2800MB 压力全部成功，超 available 缓冲 7.6 倍零失败）
+释放后 ~35s 完全 re-park
+```
+
+### 冷却期行为（CooldownSec=5，触发全释放后）
+
+```
+t=1s   全量释放（LowMemoryCondition，1 秒内）
+t=2-6  冷却真空期：available 高达 2.7GB 但 park 不抢回
+t=7    冷却过期后 park 尝试回归，被持续压力再压回（冷却翻倍 5→10s）
+压力停止后 ~10s：完全 re-park
+```
+
+### 连续承诺分配的响应（修复后脉冲实验：10×128MB，500ms 间隔）
+
+```
+headroom：1440→1295→1161→1022→885→747→610→997→860→721→583
+                                        ↑ 跌破 410MB 阈值 → watch 100ms 内
+                                          唤醒 → 释放一半 +1.3GB
+结果：10/10 全部成功（alive: 10），释放以 100ms 级节奏跟上 256MB/s 分配消耗
+```
+
+### 配置矩阵（同一 VM，切 pagefile/内存）
+
+| 配置 | CommitLimit | 行为 |
+|---|---|---|
+| 4GB + 无 pagefile | 4095 | park ~2.5GB（比有 pagefile 浅 ~200MB，停在 commit 阈值线上——“U>W 时承诺上限先绑”的实证） |
+| 4GB + 16GB pagefile | 20671 | 余量 870MB（410MB~3.6GB 区间）：旧驱动振荡，新驱动 park 稳定（RSS 4 分钟零方差） |
+| 16GB + 自动 | 16383 | park 12.7GB，收敛 ~1 分钟，阈值自动适配 1.6GB |
+| 2GB + 自动（冷启动） | 2047 | 下限分支实测（水位线 256MB floor、阈值 204MB）；注意：冷启动 pagefile=0 时大承诺分配会 1455，由 MinCommitMb 参数缓解 |
 
 ## 环境与驱动
 
