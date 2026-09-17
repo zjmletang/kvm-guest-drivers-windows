@@ -1,4 +1,4 @@
-{"version": 2, "width": 80, "height": 24, "timestamp": 1789638454, "env": {"SHELL": "/bin/bash", "TERM": null}, "title": "virtio-balloon FPR live demo"}
+{"version": 2, "width": 80, "height": 24, "timestamp": 1789638454, "env": {"SHELL": "/bin/bash", "TERM": "xterm-256color"}, "title": "virtio-balloon FPR live demo"}
 [0.059738, "o", "\r\n\u001b[1;36m===================================================\r\n  virtio-balloon Free Page Reporting - live demo\r\n===================================================\u001b[0m\r\n"]
 [1.060682, "o", "  host: bare metal + QEMU 9.2 + libvirt\r\n  guest: Windows 11 x64, 4GB RAM, balloon 58707\r\n  FPR feature: negotiated (VIRTIO_BALLOON_F_PAGE_REPORTING)\r\n\r\n\u001b[1;36m===================================================\r\n  1. park steady state: FPR holds the guest's free memory\r\n"]
 [1.060727, "o", "===================================================\u001b[0m\r\n"]
