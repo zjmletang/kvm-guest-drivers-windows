@@ -1,7 +1,24 @@
 # Balloon Free Page Reporting (FPR) 设计文档
 
-> 对应实现：`Balloon/sys/reporting.c`（版本 58600 起）
-> 系列提交：210aaf80 → 50fe3ebd → 74f4ab2c → 22ad5876 → febfb2e2
+> 对应实现：`Balloon/sys/reporting.c`（版本 58707 起）
+> 系列提交：210aaf80 → 50fe3ebd → 74f4ab2c → 22ad5876 → febfb2e2 → 09043d2b →
+> ab013f9a → e30e472f → 94bf0ac3 → cb84b824 →（cast/文档各一笔）
+> 配套文档：`FPR-COMMIT-MODEL.md`（Windows 双账本模型与 commit 保护推导）、
+> `FPR-DEMO.md`（演示手册与实测数据）、`tests/fpr/fpr-demo.cast`（51 秒实况录像）
+
+## 0. 代码地图（快速导航）
+
+| 位置 | 职责 |
+|---|---|
+| `reporting.c: BalloonReportStep` | 周期主体：三态查询 → 释放分支（低内存/commit/水位）→ 冷却检查 → park 循环（每 batch 复查） |
+| `reporting.c: ReportingQueryMemoryState` | 一次 ZwQuerySystemInformation 取 available/commitLimit/committed |
+| `reporting.c: ReportingCommitHeadroomLow` | commit 阈值判定：MinCommitMb 覆盖或 max(RAM/10, 128MB) |
+| `reporting.c: ReportingStartCooldown` | 全量释放后的冷却：60s 起跳，重复触发翻倍至 5min，10min 安静后重置 |
+| `reporting.c: ReportingReadParameters` | 统一读取 5 个注册表参数（MinFreeMb/MinCommitMb/ReportIntervalMs/CooldownSec…） |
+| `reporting.c: BalloonReportLowMemWatchRoutine` | watch 线程：LowMemoryCondition 事件（毫秒级）+ commit 100ms 轮询快路径 |
+| `reporting.c: BalloonReportInitialize` | 参数读取、RAM 缓存（ReportingTotalPages）、vring 深度读取（min(32, vring_size)） |
+| `Device.c: BalloonRoutine` | worker 主循环：超时 = ReportIntervalMs → Step；**事件唤醒无条件 Step**（cb84b824 修复） |
+| `ProtoTypes.h` | 全部宏（阈值/冷却/批次）与 DEVICE_CONTEXT 字段 |
 
 ## 1. 目标与方案
 
@@ -10,145 +27,153 @@
 - **report-then-hold**：上报后的页保持驱动持有（不归还 OS），guest 无法触碰，host 侧
   discard 效果持续有效；guest 需要内存时才归还（水位/低内存/commit 触发）。
   依据：report-then-release 在 Windows 不可行（归还页被 MM zeroing 触碰，host 侧
-  回收效果立即消失）；hold 语义已由 virtio-comment 讨论确认在现有 spec 之内
-  （"reuse the reported free pages when needed" 中的归还仅为示例），无需新 feature bit。
+  回收效果立即消失）；hold 语义已由 virtio-comment 讨论确认在现有 spec 之内，
+  无需新 feature bit。
 - **2MB 对齐上报**（大小与边界）：对齐 host 侧 THP 回收粒度与 Linux pageblock_order
   默认粒度；spec "SHOULD attempt to report large pages rather than smaller ones"。
-- 上游系列定位：机制 → 测试 → 参数化 → 响应性 → commit 保护，五笔可拆分提交。
 
 ## 2. 线程模型
 
 ```
 BalloonRoutine（复用现有 balloon worker 线程）
-  └── KeWaitForSingleObject(WakeUpThread, timeout = 2s 或 无限)
-        ├── 事件唤醒：inflate/deflate 处理 + 低内存时即时 Step
-        └── 2s 超时：BalloonReportStep（周期主体）
+  └── KeWaitForSingleObject(WakeUpThread, timeout = ReportIntervalMs 或 无限)
+        ├── 事件唤醒：inflate/deflate 处理 + 无条件 BalloonReportStep
+        │   （Step 自带全部前置检查，误唤醒无害——cb84b824 修复：
+        │    此前仅 IsLowMemory 时才 Step，watch 的 commit 唤醒被忽略）
+        └── 超时：BalloonReportStep（周期主体）
 
-BalloonReportLowMemWatchRoutine（新增专用线程，仅 FPR 激活时）
-  └── KeWaitForMultipleObjects(evLowMem | WatchStopEvent)
-        └── LowMemoryCondition 置位 → KeSetEvent(WakeUpThread) 即时唤醒 worker
-        └── 事件持续 signaled 期间 1s 间隔复查（NotificationEvent 防忙等）
+BalloonReportLowMemWatchRoutine（专用线程，仅 FPR 激活时）
+  └── KeWaitForMultipleObjects(evLowMem | WatchStopEvent, timeout = 100ms)
+        ├── WAIT_0（物理事件）：即时唤醒 worker；置位期间 1s 复查防忙等
+        └── TIMEOUT + held>0：commit 快路径——每 100ms 查承诺余量，
+            低则唤醒 worker（Windows 无 "commit 低" 内核事件，只能轮询；
+            held=0 时跳过查询，零开销）
 ```
 
-生命周期：D0Entry 创建（evLowMem 之后）→ D0ExitPre/D0Exit 先于 evLowMem 句柄
-关闭和 worker 停止而停止。watch 创建失败降级为纯轮询（worker 的周期检查是兜底）。
+生命周期：D0Entry 创建（evLowMem 之后）→ D0Exit 先于句柄关闭而停止。
+watch 创建失败降级为纯轮询。单线程原则：held MDL 链与统计只被 worker 访问，无锁。
 
-单线程原则：held MDL 链与统计只被 worker 访问（归还路径在 worker 停止后执行），
-无需锁；reporting_vq 与 inf/def 队列共用 InfDefQueueLock。
+## 3. 三个核心问题（触发 / 节奏 / 地址）
 
-## 3. 三个核心机制（触发 / 节奏 / 地址）
+### 3.1 什么时候上报：周期轮询 + 四道闸门 + 冷却
 
-### 3.1 什么时候上报：周期轮询 + 水位闸门
-
-Windows 不给驱动 free list 可见性（无 Linux 的 page-release 钩子），因此采用纯周期模型：
+Windows 不给驱动 free list 可见性，采用纯周期模型：
 
 ```
-每 2s（REPORTING_INTERVAL_MS，对齐 Linux page_reporting_delay_ms 量级）：
-  ① IsLowMemory → 全量归还，return
-  ② commit 余量 < max(CommitLimit/10, 128MB) → 渐进归还一半，return
+每 ReportIntervalMs（默认 2000，对齐 Linux page_reporting_delay_ms）：
+  ① IsLowMemory → 全量归还 + 进入冷却，return
+  ② commit 余量 < max(RAM/10, 128MB) 或 MinCommitMb 覆盖 → 渐进归还一半，return
   ③ available < 水位/2 → 渐进归还一半，return
   ④ available ≤ 水位 → 静默等待
-  ⑤ 否则 → 分配并上报
-水位 = MinFreeMb 覆盖值，或 auto = max(RAM/8, 256MB)
+  ⑤ 冷却期内（全量释放后 60s 起，指数退避）→ 跳过 park
+  ⑥ 否则 → 分配并上报（每 batch 复查 ②③④）
+水位 = MinFreeMb 覆盖，或 auto = max(RAM/8, 256MB)
 ```
 
-首次上报：DRIVER_OK 后第一个周期。低内存响应：watch 线程即时（≤ 周期）。
+**响应模型**（连续分配场景的语义）：
+- 单次 < MinCommitMb 的分配：稳态下必成功；
+- 突发速率 ≤ 预留/0.1s（默认值下 ≥ 4GB/s）：全程无失败（watch 100ms 快路径
+  实测：10×128MB 每 500ms 全部成功，释放以 100ms 级跟上 256MB/s 消耗）；
+- 更高速率：响应窗口内的部分 1455 失败后恢复——Windows 无 commit 同步回调，
+  硬保证不可实现（Linux watermark 同理）。
 
 ### 3.2 每次上报多久：三层节奏
 
 | 层 | 粒度 | 控制 |
 |---|---|---|
-| vq 请求 | 32 段 = 64MB（= QEMU vring 深度） | add_buf + kick + 同步 ack（1s 超时兜底） |
-| 周期 | ≤ 8 批 = 512MB（REPORTING_BATCHES_PER_CYCLE） | 批间复查水位/commit 即时刹车 |
-| 全局收敛 | 4GB guest park 2.6GB 实测 10~20s | 分配失败（2M 块耗尽/内存压力）即停 |
+| vq 请求 | min(32, vring_size) 段 = ≤64MB | add_buf + kick + 同步 ack（1s 超时兜底） |
+| 周期 | ≤ 8 批 = ≤512MB | 批间复查水位/commit 即时刹车 |
+| 全局收敛 | 4GB park 2.6GB ~15s；16GB park 12.7GB ~1min | 分配失败即停 |
 
-稳态开销：每周期一次 ZwQuerySystemInformation + 比较，近似为零。
+深度来源：`virtqueue_get_vring_size(RepVirtQueue)`（virtio-win 库新增接口，
+上游分支 vring-size / PR #1647），上限取栈上数组界 32。QEMU 的 reporting_vq
+深度硬编码 32，ring 内存不足时传输层可折半——动态读取天然适配。
 
 ### 3.3 从哪里开始上报：由 MM 决定（设计上不控制）
 
-分配调用为 `MmAllocatePagesForMdlEx(0, MAX, SkipBytes=2MB, 64MB,
+分配调用为 `MmAllocatePagesForMdlEx(0, MAX, SkipBytes=2MB, 批量,
 REQUIRE_CONTIGUOUS_CHUNKS | MM_DONT_ZERO_ALLOCATION)`：
 
-- **没有地址起点/游标**。SkipBytes 在 REQUIRE_CONTIGUOUS_CHUNKS 模式下是块粒度约束
-  （每块恰好 2MB 且 2MB 对齐），不是起点。
-- **供给顺序（MSDN 明文）**：大页缓存优先；耗尽后由 MM 构造新的 2MB 连续块
-  （"attempts to construct additional large pages, which may take a long time"）。
-  构造过程的原料链（从 zeroed/free/standby 哪条链取料）无公开文档，不做假设。
-  实测块物理聚簇（trace 连续递减 2M）是 MM 行为而非设计保证。
-- 驱动只做验收：512 连续 PFN + 首 PFN 2M 对齐才上报；不合格块跳过但仍 hold。
-- 同地址二次上报是正常行为（归还 → 回 MM → 再分配 → 再上报），对 host 幂等。
+- SkipBytes 在 REQUIRE_CONTIGUOUS_CHUNKS 模式下是块粒度约束（每块恰好 2MB
+  且 2MB 对齐），不是起点；供给顺序（MSDN 明文）大页缓存优先，耗尽后构造。
+- 驱动只做验收；同地址二次上报是正常行为（归还 → 回 MM → 再分配），对 host 幂等。
+- `MM_DONT_ZERO_ALLOCATION`：清零 = 触碰 = host 侧 fault in，与 FPR 目的直接冲突。
+- 与 Linux 的差异：Linux 有 free list 游标与 PageReported 标记（能"扫描"）；
+  我们只能"申请"，"完成"由水位与 2M 块可获得性定义。
 
-两个 flag 的选择理由：
-
-- `MM_ALLOCATE_REQUIRE_CONTIGUOUS_CHUNKS`：获得“2MB 大小 + 2MB 边界对齐”块的唯一
-  官方途径；部分分配时每块仍保证完整 2MB，不浪费。相邻但未采用的选项：
-  `MM_ALLOCATE_PREFER_CONTIGUOUS`（尽力而为，不满足硬约束）；`MM_ALLOCATE_FAST_LARGE_PAGES`
-  （仅从大页缓存取、缓存空即失败——不采用：接受构造延迟换取更大 park 上限）。
-- `MM_DONT_ZERO_ALLOCATION`：清零 = 触碰每页 = host 侧 fault in + dirty，与 FPR
-  目的（页保持 clean/discardable）直接冲突。文档条件：不暴露给用户态即满足
-  （我们的页无 VA、不映射）。信息泄露无新增面：guest 内核本为特权，host 本可读
-  全部 guest 内存；归还后 MM 按需 zero。
-
-与 Linux 的差异：Linux 有 zone/order/migratetype 游标与 PageReported 标记（能
-"扫描" free list）；我们只能"申请"，"完成"由水位与 2M 块可获得性（碎片化 floor）
-定义。host 不关心顺序与完整性，只关心段集合的 2M 对齐。
-
-## 4. 保护机制矩阵
+## 4. 保护机制矩阵（响应延迟实测）
 
 | 触发 | 条件 | 动作 | 响应延迟 |
 |---|---|---|---|
-| LowMemoryCondition | MM 置位（阈值内核黑盒，不可配置） | 全量归还 | 即时（watch 线程） |
-| commit 余量低 | < max(CommitLimit/10, 128MB) | 渐进归还一半/周期 | ≤ 2s |
-| 物理水位低 | available < 水位/2 | 渐进归还一半/周期 | ≤ 2s |
-| 分配失败 | MM 拒绝（压力/块耗尽） | 本周期停止 | 即时 |
+| LowMemoryCondition | MM 置位（实测 ~7-11% RAM，黑盒） | 全量归还 + 冷却 | **毫秒级**（事件） |
+| commit 余量低 | < max(RAM/10, 128MB) 或 MinCommitMb | 渐进归还一半/周期 | **≤100ms**（watch 轮询） |
+| 物理水位低 | available < 水位/2 | 渐进归还一半/周期 | ≤ 周期 |
+| 分配失败 | MM 拒绝 | 本周期停止 | 即时 |
 
-commit 语义要点：held 页 pinned + committed，双占物理与记账；commit 是 demand-zero
-延迟分配，承诺不占物理，故物理水位对 commit 余量无蕴含关系（曾误判"无 pagefile 时
-蕴含成立"，被推翻——见 febfb2e2）。system managed pagefile 自动扩容可吸收大部分
-commit 压力。
+commit 语义要点（详见 FPR-COMMIT-MODEL.md）：held 页 pinned+committed 双占；
+demand-zero 使两账独立（无 pagefile 亦不蕴含——曾被反例推翻）；阈值锚定 RAM
+而非 CommitLimit（大 pagefile 膨胀分母会导致过度保守/振荡，Case 实测）；
+两本账的双向不对称各有守护者：水位线看不见的（未物化承诺）commit 检查看见，
+commit 看不见的（文件后备页）水位线看见。
 
 ## 5. 可配置参数（注册表，INF 预置默认值）
 
 ```
 HKLM\SYSTEM\CurrentControlSet\Services\BALLOON\Parameters
-  EnableFpr  (DWORD, 默认 1)：0 = 不协商 F_PAGE_REPORTING（逃生门）
-  MinFreeMb  (DWORD, 默认 0 = auto)：保留可用内存，钳制 [64MB, RAM/2]
+  EnableFpr       (DWORD, 默认 1)      ：0 = 不协商 F_PAGE_REPORTING（逃生门）
+  MinFreeMb       (DWORD, 默认 0=auto) ：物理水位覆盖，钳制 [64MB, RAM/2]
+  MinCommitMb     (DWORD, 默认 0=auto) ：承诺预留覆盖，钳制 [128MB, RAM/2]
+  ReportIntervalMs(DWORD, 默认 0=2000)  ：周期，钳制 [100, 60000]
+  CooldownSec     (DWORD, 默认 0=60)   ：冷却起跳值，钳制 [1, 600]
 ```
 
-机制部分（LowMemoryCondition、迟滞带、渐进归还节奏）刻意不开放。
+机制部分（迟滞带、指数退避、渐进归还节奏）刻意不开放。MinCommitMb 的动机：
+2GB + 冷启动 pagefile=0 场景 park 挤占承诺余量，大承诺分配 1455（见 §8）。
 
 ## 6. 异常处理
 
 - 可预期路径：surprise removal / D0 exit / reboot → 停线程 → ReleaseAll 归还；
   host 不 ack → 页保持 hold，不重发，等恢复或移除。
-- 不可预期路径：guest bugcheck → 重启自愈；已上报页由 host demand paging 兜底
-  （RAMBlock 地址空间常在，discard 只释放物理后备，任何写入按需 fault 回来，
-  host 零动作）。崩溃转储中这些页为零（本就是空闲页，取证价值低）。
-- 驱动自身 bug（链表/计数损坏）：无结构保护，靠 Driver Verifier + review
-  （测试矩阵 M.1）。
-- 数据安全基座：上报页从分配到归还全程不承载任何数据（DONT_ZERO + 不触碰 +
-  归还后按 zeroed 语义供给），任何一侧异常的最坏结果是内存量错误，不是数据损坏。
+- 不可预期路径：guest bugcheck → 重启自愈；host 侧 demand paging 兜底。
+- 驱动自身 bug：无结构保护，靠 Driver Verifier + review（测试矩阵 M.1，未跑）。
+- 数据安全基座：上报页从分配到归还全程不承载数据，最坏结果是内存量错误。
 
-## 7. 实测数据摘要（4GB guest / Win Server 2022 / QEMU 9.2）
+## 7. 实测数据摘要（4GB Win11 / QEMU 9.2，58707）
 
-- park：RSS 4.16GB → 1.4GB（释放 ~2.6GB），hold 稳定性 7 样本反弹 0~1MB
-- 2M 对齐：ram_block_discard_range 全样本 0x200000 且地址 2M 对齐（零例外）
-- 压力归还：guest 吃 1.5GB，RSS +1.7GB，首个 2s 采样内启动
-- re-park：压力释放后 ~10s 回基线；qemu-cpu 无可观测变化
-- commit：park 2.6GB 与 committed bytes 一比一（3852MB/4607MB limit，fixed 512MB
-  pagefile）；headroom 高于阈值时保护静默、行为与无保护版本一致
-- setmem 回归：inflate/deflate 正常（低内存保护与 FPR 归还协同），deflate 精确恢复
+- **park**：RSS 4.15GB → 1.4GB（释放 ~2.6GB）；16GB 配置 park 12.7GB ~1min 收敛；
+  无 pagefile 时 park 浅 ~200MB（commit 上限先绑，模型实证）
+- **2M 对齐**：5480 条 ram_block_discard_range 全部 0x200000 且 2M 对齐（零例外）
+- **压力归还**：2800MB 压力首秒即响应（RSS t+1s +947MB），3~9s 全量完成；
+  压力超 available 缓冲 7.6 倍零失败；释放后 10~35s 完全 re-park
+- **冷却**：全量释放后 5s 真空期（CooldownSec=5 实验）；重复触发翻倍；
+  压力停后 ~10s 恢复
+- **commit 保护**：脉冲 10×128MB 全部成功（headroom 锯齿 + 释放跳升）；
+  大 pagefile（16GB）低余量下旧驱动振荡（RSS 每分钟 ±1GB）vs 新驱动 4 分钟零方差；
+  无 pagefile 施压穿透阈值 → 1 秒内释放一半（watch 修复的正面验证）
+- **watch 修复（cb84b824）**：trace 显示修复前 watch 每 100ms 唤醒被 worker 忽略
+  （worker 只认 IsLowMemory）；修复后唤醒路径无条件 Step
 
 ## 8. 已知边界
 
 - IOMMU（ACCESS_PLATFORM）下不协商 FPR：上报页无 VA，无法 MapTransfer 取 IOVA
 - 2M 块碎片化 floor：available ~500MB 处 park 耗尽可分配块（与水位无关的自然极限）
-- commit 触发态的运行时快照未取得（guest 侧大预留施压受 PS 分配限制）；
-  触发路径与物理水位共享已验证的渐进归还代码
+- **2GB + 冷启动 pagefile=0**：park ~800MB 后承诺余量 ~260MB，应用大承诺分配
+  1455 失败；自愈路径 = 自动 pagefile 增长后重试成功；缓解 = MinCommitMb 调大预留
 - x86/ARM64 编译依赖上游 CI（本机 WDK 26100 无相应工具链）
-- **REPORTING_MAX_SEGMENTS=32 为硬编码**（对齐 QEMU reporting_vq 的深度 32，非从
-  vring 读取——virtio-win 库缺少 Linux 的 `virtqueue_get_vring_size()` 对应接口；
-  vring 深度存于库内部结构 `vq->vring.num`，加访问器是候选的上游小改动）。
-  兜底：批量 add_buf 失败自动降级为逐段请求（功能正确、吞吐降级）。另注意
-  VirtIOPCIModern 在 ring 内存分配失败时会把深度折半重试，实际深度可能小于设备
-  offer 值，此时依赖同一降级路径。
+- Driver Verifier（测试矩阵 M.1）未跑
+- ~~REPORTING_MAX_SEGMENTS=32 硬编码~~：已解决（virtqueue_get_vring_size，
+  vring-size 分支 / PR #1647）
+
+## 9. 当前状态（供接手的 agent/人）
+
+- **分支**：`fpr`（已 push 到 fork，14 笔）；`vring-size` 分支独立提上游
+  （PR #1647 评审中，含 vioserial clang-format CI 修复）
+- **上游拆分**：vring-size PR 合入后，fpr rebase 到新 master 并 drop 重复的
+  `[VirtIO]` commit（689e1f67），然后 FPR 系列开 PR
+- **文档语言**：三份 .md 均为中文（审阅定稿后需英文化随 PR）
+- **测试资产**：`tests/fpr/run-fpr-tests.ps1`（T1/T2.x 自动矩阵）；
+  `tests/fpr/fpr-demo.cast`（asciinema，`asciinema play` 播放）；
+  测试工具（eatmem/lowmem-watch/commit-reserve，_tools/ 目录未入库）
+- **实验环境**：裸金属 47.83.225.42 的 fpr_upstream VM（4GB/自动 pagefile/
+  58707），WinRM 经 winrm_ps.py；施压用 schtasks（WinRM 会话会杀 Start-Process
+  子进程）；WPP trace 用 logman level 255 + tracepdb/tracefmt 解码
