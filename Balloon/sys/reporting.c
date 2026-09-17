@@ -116,17 +116,22 @@ static NTSTATUS ReportingQueryMemoryState(OUT PULONG AvailablePages,
  * without touching it can leave plenty of available pages while the commit
  * limit is nearly exhausted. Hand pages back before the held charge can eat
  * into that last reserve - built-in, deliberately not configurable.
+ *
+ * The reserve is anchored to the physical memory size rather than to the
+ * commit limit: a large pagefile inflates the commit limit without making
+ * a low headroom any more dangerous (materialization can be paged out),
+ * so the reserve must not grow with the pagefile.
  */
-static __inline BOOLEAN ReportingCommitHeadroomLow(IN ULONG CommitHeadroomPages, IN ULONG CommitLimitPages)
+static __inline BOOLEAN ReportingCommitHeadroomLow(IN PDEVICE_CONTEXT devCtx, IN ULONG CommitHeadroomPages)
 {
     ULONG threshold;
 
-    if (CommitLimitPages == 0)
+    if (devCtx->ReportingTotalPages == 0)
     {
         return FALSE;
     }
 
-    threshold = CommitLimitPages / REPORTING_COMMIT_HEADROOM_FRACTION;
+    threshold = devCtx->ReportingTotalPages / REPORTING_COMMIT_HEADROOM_FRACTION;
     if (threshold < REPORTING_MIN_COMMIT_HEADROOM_PAGES)
     {
         threshold = REPORTING_MIN_COMMIT_HEADROOM_PAGES;
@@ -478,7 +483,7 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
     }
 #endif // !BALLOON_INFLATE_IGNORE_LOWMEM
 
-    if (devCtx->ReportingMdlCount != 0 && ReportingCommitHeadroomLow(commitHeadroomPages, commitLimitPages))
+    if (devCtx->ReportingMdlCount != 0 && ReportingCommitHeadroomLow(devCtx, commitHeadroomPages))
     {
         TraceEvents(TRACE_LEVEL_WARNING,
                     DBG_REPORTING,
@@ -519,7 +524,7 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
 
         /* re-check the available memory and commit headroom while filling up */
         if (!NT_SUCCESS(ReportingQueryMemoryState(&availablePages, &commitHeadroomPages, &commitLimitPages)) ||
-            availablePages <= allocWatermark || ReportingCommitHeadroomLow(commitHeadroomPages, commitLimitPages))
+            availablePages <= allocWatermark || ReportingCommitHeadroomLow(devCtx, commitHeadroomPages))
         {
             break;
         }

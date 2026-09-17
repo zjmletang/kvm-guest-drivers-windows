@@ -95,7 +95,11 @@
  * prevent the held charge from eating into the last commit reserve of
  * workloads that reserve a lot of memory without touching it. Pages are
  * handed back once the remaining commit limit (RAM + pagefile - committed)
- * drops below a tenth of the commit limit, but never less than 128MB.
+ * drops below a tenth of the physical memory size, but never less than
+ * 128MB. The reserve is deliberately not tied to the commit limit: a
+ * large pagefile inflates the limit without making a low headroom more
+ * dangerous (materialization can be paged out), so the reserve must not
+ * grow with the pagefile.
  */
 #define REPORTING_COMMIT_HEADROOM_FRACTION  10
 #define REPORTING_MIN_COMMIT_HEADROOM_PAGES (128UL * 1024 * 1024 / PAGE_SIZE)
