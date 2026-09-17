@@ -131,10 +131,17 @@ static __inline BOOLEAN ReportingCommitHeadroomLow(IN PDEVICE_CONTEXT devCtx, IN
         return FALSE;
     }
 
-    threshold = devCtx->ReportingTotalPages / REPORTING_COMMIT_HEADROOM_FRACTION;
-    if (threshold < REPORTING_MIN_COMMIT_HEADROOM_PAGES)
+    if (devCtx->ReportingMinCommitPages != 0)
     {
-        threshold = REPORTING_MIN_COMMIT_HEADROOM_PAGES;
+        threshold = devCtx->ReportingMinCommitPages;
+    }
+    else
+    {
+        threshold = devCtx->ReportingTotalPages / REPORTING_COMMIT_HEADROOM_FRACTION;
+        if (threshold < REPORTING_MIN_COMMIT_HEADROOM_PAGES)
+        {
+            threshold = REPORTING_MIN_COMMIT_HEADROOM_PAGES;
+        }
     }
     return CommitHeadroomPages < threshold;
 }
@@ -338,45 +345,147 @@ BOOLEAN ReportingIsEnabled(IN WDFDEVICE Device)
 }
 
 /*
- * Reads the optional MinFreeMb value from the driver service Parameters
- * registry key and converts it to the watermark override in pages, clamped
- * to [64MB, RAM/2]. A missing or zero value keeps the automatic default.
+ * Reads the optional free page reporting parameters from the driver
+ * service Parameters registry key. A missing or zero value keeps the
+ * automatic default of each:
+ *   MinFreeMb        - available memory watermark override in MB,
+ *                     clamped to [64MB, RAM/2]
+ *   MinCommitMb      - commit headroom reserve override in MB,
+ *                     clamped to [128MB, RAM/2]
+ *   ReportIntervalMs - reporting cycle interval in ms,
+ *                     clamped to [100, 60000]
+ *   CooldownSec      - park cooldown base after a full low-memory
+ *                     release, clamped to [1, 600]
  */
-static VOID ReportingReadWatermarkOverride(IN WDFDEVICE Device, IN PDEVICE_CONTEXT devCtx)
+static VOID ReportingReadParameters(IN WDFDEVICE Device, IN PDEVICE_CONTEXT devCtx)
 {
-    DECLARE_CONST_UNICODE_STRING(valueName, L"MinFreeMb");
+    DECLARE_CONST_UNICODE_STRING(freeName, L"MinFreeMb");
+    DECLARE_CONST_UNICODE_STRING(commitName, L"MinCommitMb");
+    DECLARE_CONST_UNICODE_STRING(intervalName, L"ReportIntervalMs");
+    DECLARE_CONST_UNICODE_STRING(cooldownName, L"CooldownSec");
     WDFKEY parametersKey = NULL;
-    ULONG minFreeMb = 0;
+    ULONG value = 0;
 
     devCtx->ReportingMinFreePages = 0;
+    devCtx->ReportingMinCommitPages = 0;
+    devCtx->ReportingIntervalMs = REPORTING_INTERVAL_MS;
+    devCtx->ReportingCooldownSec = 0;
 
-    if (NT_SUCCESS(WdfDriverOpenParametersRegistryKey(WdfDeviceGetDriver(Device),
-                                                      KEY_READ,
-                                                      WDF_NO_OBJECT_ATTRIBUTES,
-                                                      &parametersKey)))
+    if (!NT_SUCCESS(WdfDriverOpenParametersRegistryKey(WdfDeviceGetDriver(Device),
+                                                       KEY_READ,
+                                                       WDF_NO_OBJECT_ATTRIBUTES,
+                                                       &parametersKey)))
     {
-        if (NT_SUCCESS(WdfRegistryQueryULong(parametersKey, &valueName, &minFreeMb)) && minFreeMb != 0)
-        {
-            ULONGLONG pages = (ULONGLONG)minFreeMb * 1024 * 1024 / PAGE_SIZE;
-
-            if (pages < REPORTING_HARD_MIN_AVAILABLE_PAGES)
-            {
-                pages = REPORTING_HARD_MIN_AVAILABLE_PAGES;
-            }
-            if (devCtx->ReportingTotalPages != 0 && pages > devCtx->ReportingTotalPages / 2)
-            {
-                pages = devCtx->ReportingTotalPages / 2;
-            }
-            devCtx->ReportingMinFreePages = (ULONG)pages;
-
-            TraceEvents(TRACE_LEVEL_INFORMATION,
-                        DBG_REPORTING,
-                        "MinFreeMb=%u override, watermark %u pages\n",
-                        minFreeMb,
-                        devCtx->ReportingMinFreePages);
-        }
-        WdfObjectDelete(parametersKey);
+        return;
     }
+
+    if (NT_SUCCESS(WdfRegistryQueryULong(parametersKey, &freeName, &value)) && value != 0)
+    {
+        ULONGLONG pages = (ULONGLONG)value * 1024 * 1024 / PAGE_SIZE;
+
+        if (pages < REPORTING_HARD_MIN_AVAILABLE_PAGES)
+        {
+            pages = REPORTING_HARD_MIN_AVAILABLE_PAGES;
+        }
+        if (devCtx->ReportingTotalPages != 0 && pages > devCtx->ReportingTotalPages / 2)
+        {
+            pages = devCtx->ReportingTotalPages / 2;
+        }
+        devCtx->ReportingMinFreePages = (ULONG)pages;
+
+        TraceEvents(TRACE_LEVEL_INFORMATION,
+                    DBG_REPORTING,
+                    "MinFreeMb=%u override, watermark %u pages\n",
+                    value,
+                    devCtx->ReportingMinFreePages);
+    }
+
+    if (NT_SUCCESS(WdfRegistryQueryULong(parametersKey, &commitName, &value)) && value != 0)
+    {
+        ULONGLONG pages = (ULONGLONG)value * 1024 * 1024 / PAGE_SIZE;
+
+        if (pages < REPORTING_MIN_COMMIT_HEADROOM_PAGES)
+        {
+            pages = REPORTING_MIN_COMMIT_HEADROOM_PAGES;
+        }
+        if (devCtx->ReportingTotalPages != 0 && pages > devCtx->ReportingTotalPages / 2)
+        {
+            pages = devCtx->ReportingTotalPages / 2;
+        }
+        devCtx->ReportingMinCommitPages = (ULONG)pages;
+
+        TraceEvents(TRACE_LEVEL_INFORMATION,
+                    DBG_REPORTING,
+                    "MinCommitMb=%u override, commit reserve %u pages\n",
+                    value,
+                    devCtx->ReportingMinCommitPages);
+    }
+
+    if (NT_SUCCESS(WdfRegistryQueryULong(parametersKey, &intervalName, &value)) && value != 0)
+    {
+        if (value < REPORTING_MIN_INTERVAL_MS)
+        {
+            value = REPORTING_MIN_INTERVAL_MS;
+        }
+        if (value > REPORTING_MAX_INTERVAL_MS)
+        {
+            value = REPORTING_MAX_INTERVAL_MS;
+        }
+        devCtx->ReportingIntervalMs = value;
+
+        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_REPORTING, "ReportIntervalMs=%u override\n", value);
+    }
+
+    if (NT_SUCCESS(WdfRegistryQueryULong(parametersKey, &cooldownName, &value)) && value != 0)
+    {
+        if (value < 1)
+        {
+            value = 1;
+        }
+        if (value > 600)
+        {
+            value = 600;
+        }
+        devCtx->ReportingCooldownSec = value;
+
+        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_REPORTING, "CooldownSec=%u override\n", value);
+    }
+
+    WdfObjectDelete(parametersKey);
+}
+
+/*
+ * Park cooldown with exponential backoff: after a full low-memory release
+ * the guest needs time to recover before pages are taken again, otherwise
+ * a persistent workload oscillates between release and re-park. Each new
+ * full release within the reset window of the previous one doubles the
+ * wait (capped); a quiet period resets it to the base. The base is the
+ * built-in default or the CooldownSec parameter.
+ */
+static VOID ReportingStartCooldown(IN PDEVICE_CONTEXT devCtx)
+{
+    ULONG64 now = KeQueryInterruptTime();
+    ULONG baseMs = devCtx->ReportingCooldownSec != 0 ? devCtx->ReportingCooldownSec * 1000 : REPORTING_COOLDOWN_BASE_MS;
+    ULONG maxMs = baseMs > REPORTING_COOLDOWN_MAX_MS ? baseMs : REPORTING_COOLDOWN_MAX_MS;
+
+    if (devCtx->ReportingCooldownUntil != 0 &&
+        now - devCtx->ReportingCooldownUntil < (ULONG64)REPORTING_COOLDOWN_RESET_MS * 10000)
+    {
+        /* another full release while still close to the previous cooldown:
+         * back off exponentially */
+        devCtx->ReportingCooldownMs *= 2;
+        if (devCtx->ReportingCooldownMs > maxMs)
+        {
+            devCtx->ReportingCooldownMs = maxMs;
+        }
+    }
+    else
+    {
+        devCtx->ReportingCooldownMs = baseMs;
+    }
+    devCtx->ReportingCooldownUntil = now + (ULONG64)devCtx->ReportingCooldownMs * 10000;
+
+    TraceEvents(TRACE_LEVEL_WARNING, DBG_REPORTING, "Park cooldown for %u ms\n", devCtx->ReportingCooldownMs);
 }
 
 NTSTATUS
@@ -394,6 +503,10 @@ BalloonReportInitialize(IN WDFDEVICE Device)
     devCtx->ReportingMdlCount = 0;
     devCtx->ReportingHeldPages = 0;
     devCtx->ReportingReportedPages = 0;
+    devCtx->ReportingCooldownUntil = 0;
+    devCtx->ReportingCooldownMs = 0;
+    devCtx->ReportingIntervalMs = REPORTING_INTERVAL_MS;
+    devCtx->ReportingCooldownSec = 0;
 
     RtlZeroMemory(&basicInfo, sizeof(basicInfo));
     if (!NT_SUCCESS(ZwQuerySystemInformation(SystemBasicInformation, &basicInfo, sizeof(basicInfo), &outLen)))
@@ -402,7 +515,7 @@ BalloonReportInitialize(IN WDFDEVICE Device)
     }
     devCtx->ReportingTotalPages = basicInfo.NumberOfPhysicalPages;
 
-    ReportingReadWatermarkOverride(Device, devCtx);
+    ReportingReadParameters(Device, devCtx);
 
     /* per-request segment limit: the negotiated reporting virtqueue size,
      * capped by the on-stack segment array bound */
@@ -479,6 +592,7 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
                     "Low memory condition, releasing %d held pages\n",
                     devCtx->ReportingHeldPages);
         BalloonReportReleaseAll(WdfDevice);
+        ReportingStartCooldown(devCtx);
         return;
     }
 #endif // !BALLOON_INFLATE_IGNORE_LOWMEM
@@ -512,6 +626,21 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
                     availablePages,
                     allocWatermark);
         return;
+    }
+
+    /* park cooldown: give the guest time to recover after a full
+     * low-memory release before taking pages again */
+    if (devCtx->ReportingCooldownUntil != 0)
+    {
+        if (KeQueryInterruptTime() < devCtx->ReportingCooldownUntil)
+        {
+            TraceEvents(TRACE_LEVEL_VERBOSE,
+                        DBG_REPORTING,
+                        "In cooldown (%u ms left), skipping park\n",
+                        (ULONG)((devCtx->ReportingCooldownUntil - KeQueryInterruptTime()) / 10000));
+            return;
+        }
+        devCtx->ReportingCooldownUntil = 0;
     }
 
     while (batches < REPORTING_BATCHES_PER_CYCLE)
@@ -615,6 +744,12 @@ VOID BalloonReportStep(IN WDFOBJECT WdfDevice)
  * holds, so while it is signaled the thread re-checks its state at a
  * fixed interval instead of busy waiting. The worker's periodic check
  * remains the fallback if the thread cannot be created.
+ *
+ * The same thread also provides the fast path for the commit headroom
+ * check: Windows exposes no kernel event for a low commit limit, so the
+ * wait times out every 100ms and the thread queries the headroom itself.
+ * The query is skipped while nothing is held - there is nothing to
+ * release, and the wait then costs nothing.
  */
 VOID BalloonReportLowMemWatchRoutine(IN PVOID pContext)
 {
@@ -622,9 +757,11 @@ VOID BalloonReportLowMemWatchRoutine(IN PVOID pContext)
     PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);
     PVOID waitObjects[2];
     LARGE_INTEGER oneSecond;
+    LARGE_INTEGER hundredMs;
     LARGE_INTEGER zeroTimeout;
 
     oneSecond.QuadPart = -10000; /* 1s, relative */
+    hundredMs.QuadPart = -1000;  /* 100ms, relative */
     zeroTimeout.QuadPart = 0;
 
     waitObjects[0] = devCtx->evLowMem;
@@ -632,26 +769,51 @@ VOID BalloonReportLowMemWatchRoutine(IN PVOID pContext)
 
     for (;;)
     {
-        NTSTATUS status = KeWaitForMultipleObjects(2, waitObjects, WaitAny, Executive, KernelMode, FALSE, NULL, NULL);
+        NTSTATUS status = KeWaitForMultipleObjects(2,
+                                                   waitObjects,
+                                                   WaitAny,
+                                                   Executive,
+                                                   KernelMode,
+                                                   FALSE,
+                                                   &hundredMs,
+                                                   NULL);
 
-        if (status != STATUS_WAIT_0 || devCtx->bShutDown)
+        if (status == STATUS_WAIT_1 || devCtx->bShutDown)
         {
             break; /* stop event signaled or shutdown */
         }
 
-        /* low memory condition: wake the worker, it releases the pages */
-        TraceEvents(TRACE_LEVEL_WARNING, DBG_REPORTING, "LowMemoryCondition set, waking the worker\n");
-        KeSetEvent(&devCtx->WakeUpThread, EVENT_INCREMENT, FALSE);
-
-        while (devCtx->bShutDown == FALSE &&
-               KeWaitForSingleObject(devCtx->evLowMem, Executive, KernelMode, FALSE, &zeroTimeout) == STATUS_WAIT_0)
+        if (status == STATUS_WAIT_0)
         {
-            KeDelayExecutionThread(KernelMode, FALSE, &oneSecond);
+            /* low memory condition: wake the worker, it releases the pages */
+            TraceEvents(TRACE_LEVEL_WARNING, DBG_REPORTING, "LowMemoryCondition set, waking the worker\n");
+            KeSetEvent(&devCtx->WakeUpThread, EVENT_INCREMENT, FALSE);
+
+            while (devCtx->bShutDown == FALSE &&
+                   KeWaitForSingleObject(devCtx->evLowMem, Executive, KernelMode, FALSE, &zeroTimeout) == STATUS_WAIT_0)
+            {
+                KeDelayExecutionThread(KernelMode, FALSE, &oneSecond);
+            }
+
+            if (devCtx->bShutDown == FALSE)
+            {
+                TraceEvents(TRACE_LEVEL_INFORMATION, DBG_REPORTING, "LowMemoryCondition cleared\n");
+            }
         }
-
-        if (devCtx->bShutDown == FALSE)
+        else if (status == STATUS_TIMEOUT && devCtx->ReportingMdlCount != 0)
         {
-            TraceEvents(TRACE_LEVEL_INFORMATION, DBG_REPORTING, "LowMemoryCondition cleared\n");
+            /* commit headroom fast path: Windows exposes no kernel event
+             * for a low commit limit, poll at 100ms while pages are held */
+            ULONG availablePages = 0;
+            ULONG commitHeadroomPages = 0;
+            ULONG commitLimitPages = 0;
+
+            if (NT_SUCCESS(ReportingQueryMemoryState(&availablePages, &commitHeadroomPages, &commitLimitPages)) &&
+                ReportingCommitHeadroomLow(devCtx, commitHeadroomPages))
+            {
+                TraceEvents(TRACE_LEVEL_WARNING, DBG_REPORTING, "Commit headroom low, waking the worker\n");
+                KeSetEvent(&devCtx->WakeUpThread, EVENT_INCREMENT, FALSE);
+            }
         }
     }
 

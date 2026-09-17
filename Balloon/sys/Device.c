@@ -725,7 +725,7 @@ VOID BalloonRoutine(IN PVOID pContext)
          * reporting cycle, otherwise wait indefinitely */
         if (devCtx->RepVirtQueue != NULL)
         {
-            reportingTimeout.QuadPart = Int32x32To64(REPORTING_INTERVAL_MS, -10000);
+            reportingTimeout.QuadPart = Int32x32To64(devCtx->ReportingIntervalMs, -10000);
             timeout = &reportingTimeout;
         }
 

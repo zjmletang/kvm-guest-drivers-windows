@@ -76,8 +76,17 @@ AddReg         = Dmar.AddReg, BalloonParams.AddReg
 ; set to 0 to keep the driver to the traditional balloon behavior).
 ; Free page reporting watermark override, in MB.
 ; 0 (default) = automatic: keep at least max(RAM/8, 256MB) available to the guest.
+; Commit headroom reserve override, in MB.
+; 0 (default) = automatic: keep at least max(RAM/10, 128MB) of commit limit for the guest.
+; Reporting cycle interval, in ms.
+; 0 (default) = 2000 (the Linux page_reporting_delay_ms default), clamped to [100, 60000].
+; Park cooldown base after a full low-memory release, in s.
+; 0 (default) = 60, clamped to [1, 600]; each repeated full release doubles it.
 HKR,Parameters,EnableFpr,0x00010001,1
 HKR,Parameters,MinFreeMb,0x00010001,0
+HKR,Parameters,MinCommitMb,0x00010001,0
+HKR,Parameters,ReportIntervalMs,0x00010001,0
+HKR,Parameters,CooldownSec,0x00010001,0
 
 [Dmar.AddReg]
 HKR,Parameters,DmaRemappingCompatible,0x00010001,2

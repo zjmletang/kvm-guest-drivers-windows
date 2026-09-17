@@ -70,8 +70,12 @@
 /* Upper bound of the on-stack segment array; the per-request limit is
  * min(this, the negotiated reporting virtqueue size) */
 #define REPORTING_MAX_SEGMENTS              32
-/* Reporting cycle interval, matches Linux page_reporting_delay_ms default */
+/* Reporting cycle interval default, matches the Linux page_reporting_delay_ms
+ * default; overridable per deployment with the ReportIntervalMs value in the
+ * driver service Parameters registry key, clamped to [100, 60000] */
 #define REPORTING_INTERVAL_MS               2000
+#define REPORTING_MIN_INTERVAL_MS           100
+#define REPORTING_MAX_INTERVAL_MS           60000
 
 /*
  * Watermarks (in 4KB pages) controlling when pages are taken from and
@@ -103,6 +107,19 @@
  */
 #define REPORTING_COMMIT_HEADROOM_FRACTION  10
 #define REPORTING_MIN_COMMIT_HEADROOM_PAGES (128UL * 1024 * 1024 / PAGE_SIZE)
+
+/*
+ * Park cooldown after a full low-memory release (built-in, not
+ * configurable): once all held pages are handed back, wait before taking
+ * pages again so that the guest can actually recover - otherwise the next
+ * reporting cycle starts re-parking immediately and a guest with a
+ * persistent workload oscillates between release and re-park. Each new
+ * full release within the reset window doubles the wait (exponential
+ * backoff, capped); a quiet period resets it to the base.
+ */
+#define REPORTING_COOLDOWN_BASE_MS          (60UL * 1000)
+#define REPORTING_COOLDOWN_MAX_MS           (5UL * 60 * 1000)
+#define REPORTING_COOLDOWN_RESET_MS         (10UL * 60 * 1000)
 
 typedef struct _VIRTIO_BALLOON_CONFIG
 {
@@ -160,6 +177,11 @@ typedef struct _DEVICE_CONTEXT
      */
     ULONG ReportingTotalPages;          /* NumberOfPhysicalPages, cached */
     ULONG ReportingMinFreePages;        /* watermark override from MinFreeMb, 0 = automatic */
+    ULONG ReportingMinCommitPages;      /* commit reserve override from MinCommitMb, 0 = automatic */
+    ULONG ReportingIntervalMs;          /* reporting cycle interval, from ReportIntervalMs */
+    ULONG ReportingCooldownSec;         /* park cooldown base from CooldownSec, 0 = built-in default */
+    ULONGLONG ReportingCooldownUntil;   /* interrupt time until which park is paused, 0 = none */
+    ULONG ReportingCooldownMs;          /* current cooldown length, doubles on repeated low-memory */
     ULONG ReportingMaxSegments;         /* per-request limit, min(array bound, vring size) */
     SINGLE_LIST_ENTRY ReportingMdlList; /* held PAGE_LIST_ENTRY chain */
     ULONG ReportingMdlCount;
