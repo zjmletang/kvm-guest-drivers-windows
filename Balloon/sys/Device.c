@@ -765,11 +765,12 @@ VOID BalloonRoutine(IN PVOID pContext)
 #ifndef BALLOON_INFLATE_IGNORE_LOWMEM
             /*
              * The watch thread may have woken us for a low memory
-             * condition: release the pages without waiting for the next
-             * reporting cycle. The state check is a zero-timeout wait,
-             * cheap enough for the interrupt-driven wake-up path.
+             * condition or for a low commit headroom: run a reporting
+             * cycle without waiting for the interval. BalloonReportStep
+             * re-checks all the release conditions itself, so running it
+             * on a spurious wake-up is harmless.
              */
-            if (devCtx->RepVirtQueue != NULL && IsLowMemory(Device))
+            if (devCtx->RepVirtQueue != NULL)
             {
                 BalloonReportStep(Device);
             }
